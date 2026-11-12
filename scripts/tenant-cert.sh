@@ -60,7 +60,7 @@ server_re='^https://[][A-Za-z0-9.:-]+$'
 [[ "$server" =~ $server_re ]] || { echo "--server must be https://HOST[:PORT]" >&2; exit 2; }
 [ -z "$namespace" ] || [[ "$namespace" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] \
   || { echo "--namespace must be a namespace name" >&2; exit 2; }
-[[ "$exec_command" =~ ^[A-Za-z0-9._/~-]+$ ]] || { echo "--exec-command must be a plain path" >&2; exit 2; }
+[[ "$exec_command" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "--exec-command must be a plain path" >&2; exit 2; }
 [ -r "$csr" ] || { echo "Cannot read $csr" >&2; exit 1; }
 command -v openssl >/dev/null || { echo "openssl is needed" >&2; exit 1; }
 
@@ -83,12 +83,14 @@ check_request() {
     "CN=$user"|"CN=$user,O=$org"|"O=$org,CN=$user") ;;
     *) echo "Refused: the subject must be CN=$user, O=$org and nothing else" >&2; return 1 ;;
   esac
-  # No attributes and no requested extensions (the signer copies subject alternative names).
-  local extra
-  extra=$(openssl req -in "$1" -noout -text \
-    | awk '/^ *Attributes:/ {f = 1; next} /^ *Signature Algorithm:/ {f = 0} f' \
-    | sed 's/^ *//' | grep -v -x -e '(none)' -e 'Requested Extensions:' -e '' || true)
-  [ -z "$extra" ] || { echo "Refused: the request carries attributes or extensions: $extra" >&2; return 1; }
+  # No attributes, so no requested extensions either (the signer copies subject alternative
+  # names): the request's attribute set, the [0] at depth 2, is empty. Read from the DER
+  # structure, which every OpenSSL version prints the same way.
+  local attributes
+  attributes=$(openssl asn1parse -in "$1" | awk '/d=2/ && /cont \[ 0 \]/')
+  if ! printf '%s\n' "$attributes" | grep -qE 'l= *0 '; then
+    echo "Refused: the request carries attributes or extensions" >&2; return 1
+  fi
 }
 check_request "$work/request.pem" || exit 1
 

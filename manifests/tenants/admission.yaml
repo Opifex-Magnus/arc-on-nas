@@ -2,7 +2,8 @@
 # closed with admission policies built into the API server: no webhook to run. The validating
 # policies refuse the request with the message below; the mutating one changes the pod. None of
 # them matches anything outside tenant namespaces. Pods that existed before these were applied
-# are not checked again until they are recreated.
+# are not checked again until they are recreated: after applying to a namespace with running
+# pods, restart its workloads (`kubectl -n <namespace> rollout restart deploy,sts,ds`).
 #
 # tenant-drop-net-raw (mutating) and tenant-pod-rules' first rule: every container drops the
 #   NET_RAW capability. "baseline" keeps the runtime's default capabilities, NET_RAW among them,
@@ -11,13 +12,14 @@
 #   their traffic (DNS, the requests to the proxy). The mutating policy adds the drop to pods that
 #   lack it, so ordinary images need no change; a pod that adds NET_RAW back is refused by
 #   "baseline" itself.
-# tenant-pod-rules:
+# tenant-pod-rules (on creation; neither can change afterwards):
 #   volumes: only configMap, downwardAPI, emptyDir, ephemeral, persistentVolumeClaim, projected
 #     and secret ("restricted"'s list without csi, for which no driver is installed). "baseline"
 #     refuses hostPath but allows the network volume types (nfs, iscsi, cephfs, rbd and others),
 #     which the node mounts from its own network namespace, the host's: an NFS export on the host
 #     or the LAN would become a pod's volume, past every NetworkPolicy.
-#   images: from registries on the internet only. The node pulls images itself, outside every
+# tenant-pod-images (on creation and on every update, since a pod's image may be changed in place):
+#   images from registries on the internet only. The node pulls images itself, outside every
 #     NetworkPolicy and through no proxy for the stack network, and it may have registry mirrors
 #     for in-cluster registries (a CI image cache, say): an image named after a cluster Service,
 #     localhost or an IP address would reach those, or the host's ports.
@@ -131,14 +133,6 @@ spec:
       message: >-
         tenant namespaces allow only these volume types: configMap, downwardAPI, emptyDir,
         ephemeral, persistentVolumeClaim, projected, secret
-    # The registry is the part before the first "/" when it holds a "." or ":" or is localhost.
-    - expression: >-
-        variables.containers.all(c,
-        !c.image.matches('^(localhost|[0-9.]+|\\[[^/]*\\])(:[0-9]+)?/') &&
-        !c.image.matches('^[^/]*\\.(svc|cluster\\.local)([.:/])'))
-      message: >-
-        tenant namespaces pull images only from registries on the internet: not from localhost,
-        an IP address or a cluster Service
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -146,6 +140,47 @@ metadata:
   name: tenant-pod-rules
 spec:
   policyName: tenant-pod-rules
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        arc-on-nas/tenant: "true"
+---
+# On updates too: a pod's image may be changed in place, and the kubelet then pulls the new one.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: tenant-pod-images
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [pods, pods/ephemeralcontainers]
+  variables:
+    - name: containers
+      expression: >-
+        object.spec.containers +
+        (has(object.spec.initContainers) ? object.spec.initContainers : []) +
+        (has(object.spec.ephemeralContainers) ? object.spec.ephemeralContainers : [])
+  validations:
+    # The registry is the part before the first "/" when it holds a "." or ":" or is localhost.
+    - expression: >-
+        variables.containers.all(c,
+        !c.image.matches('(?i)^(([^/]*\\.)?localhost\\.?|[0-9.]+|\\[[^/]*\\])(:[0-9]+)?/') &&
+        !c.image.matches('(?i)^[^/]*\\.(svc|cluster\\.local)([.:/])'))
+      message: >-
+        tenant namespaces pull images only from registries on the internet: not from localhost,
+        an IP address or a cluster Service
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: tenant-pod-images
+spec:
+  policyName: tenant-pod-images
   validationActions: [Deny]
   matchResources:
     namespaceSelector:

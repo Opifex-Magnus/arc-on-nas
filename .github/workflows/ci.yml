@@ -6,8 +6,9 @@ name: CI
 #        manifests applied, the credential Secret created by scripts/register.sh, the controller
 #        chart installed through the proxy and running, the runner pod templates admitted by Pod
 #        Security "restricted", the egress rules tested from a pod, and the tenant namespaces: their
-#        permissions, admission's refusals, a certificate from scripts/tenant-cert.sh used
-#        through api-forward.yml, and a tenant pod's egress.
+#        permissions, admission's refusals and NET_RAW drops, tenant-cert.sh's refusals and a
+#        certificate it signs used by kubectl with the kubeconfig it writes through
+#        api-forward.yml, and the tenant NetworkPolicies against each target, with controls.
 #
 # What a hosted runner cannot show (README, "Status"): a scale set registering with GitHub and
 # running a job (that needs a real credential and a repository to register with), the runner
@@ -336,6 +337,26 @@ jobs:
                   -f - <<< "$(pod '' ',"securityContext":{"capabilities":{"drop":["ALL"]}}')" \
             | jq -c '.spec.containers[0].securityContext.capabilities.drop')
           echo "pod dropping ALL: $got"; [ "$got" = '["ALL"]' ]
+          # Merged by container name, each keeping its own drops: two containers and an init one.
+          cat > "$RUNNER_TEMP/three.json" <<EOF
+          {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "t"}, "spec": {
+            "initContainers": [{"name": "i", "image": "$CURL_IMAGE"}],
+            "containers": [
+              {"name": "a", "image": "$CURL_IMAGE", "securityContext": {"capabilities": {"drop": ["CHOWN"]}}},
+              {"name": "b", "image": "$CURL_IMAGE", "securityContext": {"capabilities": {"drop": ["ALL"]}}}]}}
+          EOF
+          got=$(k --as "$u" --as-group devinfra -n zuul-trial apply --dry-run=server -o json -f - \
+                  < "$RUNNER_TEMP/three.json" \
+            | jq -c '[.spec.initContainers[], .spec.containers[]]
+                     | map({(.name): .securityContext.capabilities.drop}) | add')
+          echo "drops: $got"; [ "$got" = '{"i":["NET_RAW"],"a":["CHOWN","NET_RAW"],"b":["ALL"]}' ]
+          # A running pod's image cannot be changed to a refused one.
+          k --as "$u" --as-group devinfra -n zuul-trial apply -f - <<< "$(pod '' ',"command":["sleep","600"]')"
+          patch='[{"op":"replace","path":"/spec/containers/0/image",'
+          patch+='"value":"registry-scratch.arc-scratch.svc:5000/x:1"}]'
+          refused 'tenant namespaces pull images only from registries on the internet' \
+            patch pod t --type=json -p "$patch"
+          k -n zuul-trial delete pod t --wait=false
 
           # tenant-cert.sh refuses any other subject, and creates no CertificateSigningRequest for it.
           key=$RUNNER_TEMP/tenant.key
@@ -408,19 +429,22 @@ jobs:
           from() {
             k -n "$1" exec "$2" -- curl -ksS -o /dev/null -m 5 -w '%{http_code}' --noproxy '*' "$3" 2>/dev/null || true
           }
+          # "answers" is any HTTP status; 000 is no connection.
           expect() {
-            local c; c=$(from "$1" "$2" "$3"); echo "$1/$2 -> $3: $c (want $4)"; [ "$c" = "$4" ]
+            local c; c=$(from "$1" "$2" "$3"); echo "$1/$2 -> $3: $c (want $4)"
+            if [ "$4" = answers ]; then [ "$c" != 000 ]; else [ "$c" = "$4" ]; fi
           }
-          expect zuul-trial client "http://$(ip zuul-trial same):8080/" 404
-          expect zuul-trial client "http://$(ip default open):8080/" 404
+          expect zuul-trial client "http://$(ip zuul-trial same):8080/" answers
+          expect zuul-trial client "http://$(ip default open):8080/" answers
           expect zuul-trial client "http://$(ip build-farm other):8080/" 000
           expect default control "http://$(ip zuul-trial same):8080/" 000
           # The controls show each address answers when a policy is not in the way.
-          expect default control "http://172.31.250.10:$nodeport/" 404
-          expect default control "http://10.42.0.1:$nodeport/" 404
-          expect default control "http://$GATEWAY:18081/" 200
-          expect default control "https://172.31.250.10:6443/" 401
-          expect default control "https://172.31.250.11:6443/" 401
+          expect default control "http://172.31.250.10:$nodeport/" answers
+          expect default control "http://10.42.0.1:$nodeport/" answers
+          expect default control "http://$GATEWAY:18081/" answers
+          expect default control "https://172.31.250.10:6443/" answers
+          expect default control "https://172.31.250.11:6443/" answers
+          expect default control "https://10.43.0.1:443/" answers
           expect zuul-trial client "http://172.31.250.10:$nodeport/" 000
           expect zuul-trial client "http://10.42.0.1:$nodeport/" 000
           expect zuul-trial client "http://$GATEWAY:18081/" 000

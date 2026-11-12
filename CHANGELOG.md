@@ -10,13 +10,16 @@ All notable changes to this repository. The format follows
 
 - Tenant namespaces (`manifests/tenants/`, README "Tenant namespaces"): `zuul-trial` and
   `build-farm`, for users other than the cluster admin, each with Pod Security `baseline` enforced
-  and `restricted` warned and audited, a ResourceQuota and LimitRange, a Role limited to namespaced
-  workload, configuration and Service resources bound to two users, a NetworkPolicy that admits
-  only the namespace's own pods and keeps egress off the host and the node, and two
-  ValidatingAdmissionPolicies (only `restricted`'s volume types; no Service `externalIPs`).
-  `scripts/tenant-cert.sh` signs a user's certificate request (checking its subject) for 90 days
-  and writes a kubeconfig without a key; `api-forward.yml` forwards the API server's port 6443,
-  and nothing else, to another Docker network. The smoke test checks all of it.
+  and `restricted` warned and audited, a ResourceQuota (CPU, memory, storage and a count of every
+  kind a tenant may create) and LimitRange, a Role limited to namespaced workload, configuration
+  and Service resources bound to two users, and NetworkPolicies that admit only the namespace's
+  own pods and keep egress off the host and the node. Admission policies close what `baseline`
+  leaves open: every container drops `NET_RAW` (added when missing), only `restricted`'s volume
+  types without `csi`, images only from internet registries (also on updates), no Service
+  `externalIPs`. `scripts/tenant-cert.sh` signs a user's certificate request after checking its
+  subject, attributes and the stored copy, for 90 days, and writes a kubeconfig without a key;
+  `api-forward.yml` forwards the API server's port 6443, and nothing else, to another Docker
+  network. The smoke test checks all of it.
 - A browser runner image, `arc-runner-browser`, and its example scale set `helm/browser.yaml`: the
   Ubuntu image plus the shared libraries and fonts headless Chrome for Testing needs, so jobs can
   run page tests without installing packages. Image CI downloads a pinned Chrome for Testing build,

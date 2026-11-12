@@ -492,7 +492,7 @@ host, no admin kubeconfig, no other namespace. [`manifests/tenants/`](manifests/
 | Kubernetes API | in their namespaces only ([`base/role.yaml`](manifests/tenants/base/role.yaml)): pods (with logs, `exec`, `attach`, `port-forward`), Deployments, StatefulSets, ReplicaSets, DaemonSets, Jobs, CronJobs, Services, ConfigMaps, Secrets, PersistentVolumeClaims, ServiceAccounts, HorizontalPodAutoscalers, PodDisruptionBudgets, Leases; read-only events, endpoints, NetworkPolicies, the quota and limits, pod metrics. Nothing cluster-scoped, no Roles or RoleBindings, no `escalate`, `bind` or `impersonate`. Like every authenticated user, they may also read the API's discovery documents and ask what they are allowed. |
 | Pods | Pod Security `baseline` enforced, `restricted` warned about and audited: no privileged containers, no host network, PID or IPC namespace, no `hostPath`, no host ports, no capabilities beyond the runtime's defaults. On top of that ([`admission.yaml`](manifests/tenants/admission.yaml), which says why): every container drops `NET_RAW` (added for pods that do not), only `restricted`'s volume types without `csi`, images only from registries on the internet (not localhost, an IP address or a cluster Service), and no Service with `externalIPs`. No PriorityClass, so a tenant's pod never preempts a runner. Unlike the runners, tenant pods may run as root and without a seccomp profile: images that need that (a sandbox that makes user namespaces, say) still run, at the price of more of the kernel within reach of a pod on a privileged node. |
 | Network | In: only from the namespace's own pods, so not from the runners or other tenants. Out: the internet through the proxy, and pods and Services in the cluster subject to their namespace's own policies; not the host, the node's addresses (so neither its NodePorts nor the API server, also through its Service) or anything else on the stack network ([`base/networkpolicy.yaml`](manifests/tenants/base/networkpolicy.yaml)). A tenant cannot change these policies. The node's own image pulls are outside them, which is why images must come from the internet. |
-| Resources | A `ResourceQuota` and a `LimitRange` per namespace (`<tenant>/quota.yaml`): CPU and memory requests and limits, counts of pods, Services, claims, Secrets and ConfigMaps, no NodePorts or load balancers, and a default memory limit for every container that names none. |
+| Resources | A `ResourceQuota` and a `LimitRange` per namespace (`<tenant>/quota.yaml`): CPU and memory requests and limits, claims and their storage, a count of every kind of object a tenant may create, no NodePorts or load balancers, and a default memory limit for every container that names none. |
 | Reaching the API | Through the forwarder in [`api-forward.yml`](api-forward.yml): port 6443 of the node, and nothing else, on a Docker network of your choice. |
 
 **Sizing.** A tenant's requests compete with the runners for the node's allocatable; its limits
@@ -530,6 +530,10 @@ API server's port; k3s allows no anonymous request, so without a certificate eve
 Removing it again: `docker compose -p ci-api down` and
 `docker compose exec k3s kubectl delete -k /opt/arc-on-nas/manifests/tenants`, which deletes the
 namespaces and everything in them.
+
+Applied to a namespace whose pods already run, the admission policies leave those pods as they
+are until they are recreated; restart its workloads to bring them under the rules:
+`docker compose exec k3s kubectl -n <namespace> rollout restart deploy,sts,ds`.
 
 **Issuing a user's certificate.** No secret moves: the user makes the key and keeps it, and
 sends only a certificate request for their user name:
