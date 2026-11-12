@@ -13,7 +13,9 @@ spec:
     # CPU limits only throttle; the k3s container's CPU cap and weight are what protect the host.
     limits.cpu: "16"
     requests.memory: 2Gi
-    limits.memory: 6Gi
+    # 7 GiB, not 6: the trial's pods hold about 5.25 GiB of limits, and a rolling update
+    # starts a pod's replacement (1.5 GiB for the executor) before the old one goes.
+    limits.memory: 7Gi
     pods: "20"
     services: "10"
     # A NodePort answers on every address of the node, outside the namespace's NetworkPolicies;

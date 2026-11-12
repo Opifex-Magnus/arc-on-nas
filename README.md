@@ -502,7 +502,7 @@ keep a runner `Pending` for long; the tenants' `limits.memory` are what they may
 free, and when it is not, the kernel's OOM killer inside the container picks pods with small
 requests first, which are theirs. The shipped quotas are the repository owner's host's (allocatable
 14 GiB, runners peaking at about 8 GiB of requests): `zuul-trial` 1.5 CPU and 2 GiB of requests, 16
-CPUs and 6 GiB of limits; `build-farm` 2 CPUs and 3 GiB, 12 CPUs and 8 GiB. CPU limits only
+CPUs and 7 GiB of limits; `build-farm` 2 CPUs and 3 GiB, 12 CPUs and 8 GiB. CPU limits only
 throttle a pod, and the k3s container's CPU cap and weight keep the host's share, so they are
 generous. Each quota also bounds the number of objects of every kind a tenant may create, since
 each one is a row in k3s's datastore, which the runners need too. Recompute them for yours.
