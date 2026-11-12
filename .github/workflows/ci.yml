@@ -432,7 +432,7 @@ jobs:
           # "answers" is any HTTP status; 000 is no connection.
           expect() {
             local c; c=$(from "$1" "$2" "$3"); echo "$1/$2 -> $3: $c (want $4)"
-            if [ "$4" = answers ]; then [ "$c" != 000 ]; else [ "$c" = "$4" ]; fi
+            if [ "$4" = answers ]; then [[ "$c" =~ ^[1-5][0-9]{2}$ ]]; else [ "$c" = "$4" ]; fi
           }
           expect zuul-trial client "http://$(ip zuul-trial same):8080/" answers
           expect zuul-trial client "http://$(ip default open):8080/" answers

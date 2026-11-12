@@ -3,7 +3,8 @@
 # policies refuse the request with the message below; the mutating one changes the pod. None of
 # them matches anything outside tenant namespaces. Pods that existed before these were applied
 # are not checked again until they are recreated: after applying to a namespace with running
-# pods, restart its workloads (`kubectl -n <namespace> rollout restart deploy,sts,ds`).
+# pods, restart its workloads (`kubectl -n <namespace> rollout restart deploy,sts,ds`) and recreate its
+# other pods (bare pods, Jobs).
 #
 # tenant-drop-net-raw (mutating) and tenant-pod-rules' first rule: every container drops the
 #   NET_RAW capability. "baseline" keeps the runtime's default capabilities, NET_RAW among them,
@@ -165,12 +166,20 @@ spec:
         object.spec.containers +
         (has(object.spec.initContainers) ? object.spec.initContainers : []) +
         (has(object.spec.ephemeralContainers) ? object.spec.ephemeralContainers : [])
+    # On an update, only a container whose image changed: a pod admitted before these policies
+    # must stay updatable (a finalizer removed, say).
+    - name: oldImages
+      expression: >-
+        oldObject == null ? [] : (oldObject.spec.containers +
+        (has(oldObject.spec.initContainers) ? oldObject.spec.initContainers : []) +
+        (has(oldObject.spec.ephemeralContainers) ? oldObject.spec.ephemeralContainers : [])
+        ).map(c, c.name + '=' + c.image)
   validations:
     # The registry is the part before the first "/" when it holds a "." or ":" or is localhost.
     - expression: >-
-        variables.containers.all(c,
+        variables.containers.all(c, (c.name + '=' + c.image) in variables.oldImages || (
         !c.image.matches('(?i)^(([^/]*\\.)?localhost\\.?|[0-9.]+|\\[[^/]*\\])(:[0-9]+)?/') &&
-        !c.image.matches('(?i)^[^/]*\\.(svc|cluster\\.local)([.:/])'))
+        !c.image.matches('(?i)^[^/]*\\.(svc|cluster\\.local)([.:/])')))
       message: >-
         tenant namespaces pull images only from registries on the internet: not from localhost,
         an IP address or a cluster Service

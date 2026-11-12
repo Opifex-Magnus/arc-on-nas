@@ -532,8 +532,9 @@ Removing it again: `docker compose -p ci-api down` and
 namespaces and everything in them.
 
 Applied to a namespace whose pods already run, the admission policies leave those pods as they
-are until they are recreated; restart its workloads to bring them under the rules:
-`docker compose exec k3s kubectl -n <namespace> rollout restart deploy,sts,ds`.
+are until they are recreated; restart its workloads to bring them under the rules
+(`docker compose exec k3s kubectl -n <namespace> rollout restart deploy,sts,ds`), and recreate its
+other pods (bare pods, Jobs).
 
 **Issuing a user's certificate.** No secret moves: the user makes the key and keeps it, and
 sends only a certificate request for their user name:

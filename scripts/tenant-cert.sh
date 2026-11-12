@@ -88,7 +88,9 @@ check_request() {
   # structure, which every OpenSSL version prints the same way.
   local attributes
   attributes=$(openssl asn1parse -in "$1" | awk '/d=2/ && /cont \[ 0 \]/')
-  if ! printf '%s\n' "$attributes" | grep -qE 'l= *0 '; then
+  # Exactly one such element, and empty. (A [0] in the signature algorithm's parameters, also at
+  # depth 2 and outside the signature, must not count as the attribute set.)
+  if [ "$(printf '%s\n' "$attributes" | grep -c .)" -ne 1 ] || ! printf '%s\n' "$attributes" | grep -qE 'l= *0 '; then
     echo "Refused: the request carries attributes or extensions" >&2; return 1
   fi
 }
