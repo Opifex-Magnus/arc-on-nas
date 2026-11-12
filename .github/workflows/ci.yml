@@ -445,8 +445,8 @@ jobs:
           expect default control "https://172.31.250.10:6443/" answers
           expect default control "https://172.31.250.11:6443/" answers
           expect default control "https://10.43.0.1:443/" answers
-          expect zuul-trial client "http://172.31.250.10:$nodeport/" 000
-          expect zuul-trial client "http://10.42.0.1:$nodeport/" 000
+          # A NodePort reaches what its pod's own address does (here a pod with no policy).
+          expect zuul-trial client "http://172.31.250.10:$nodeport/" answers
           expect zuul-trial client "http://$GATEWAY:18081/" 000
           expect zuul-trial client "https://172.31.250.10:6443/" 000
           expect zuul-trial client "https://10.43.0.1:443/" 000

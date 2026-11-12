@@ -17,14 +17,18 @@ spec:
 ---
 # Egress: open, except for the stack network and the node's own addresses. The stack network
 # (docker-compose.yml) is internal, so what it holds is the host (its gateway, and through it
-# every port the host listens on), the node (the API server, the kubelet, every NodePort), the
-# proxy and the API forwarder; the internet is reachable only through the proxy, which the second
+# every port the host listens on), the node (the API server, the kubelet), the proxy and the API
+# forwarder; the internet is reachable only through the proxy, which the second
 # rule allows. Pods and Services in the cluster stay reachable, subject to the other namespaces'
 # own ingress policies, except the API server's Service (kubernetes.default, which leads to the
 # node's address): tenant pods get no API access, as runner pods get none.
 #
 #   10.42.0.0/32, 10.42.0.1/32  the node's flannel and cni0 addresses on a one-node cluster with
 #                               k3s's default pod range.
+#
+# A NodePort is not blocked by this: k3s's controller checks the packet after kube-proxy has
+# rewritten it to the Service's pod, so a NodePort reaches exactly what that pod's own address
+# does, and that pod's namespace's ingress policy decides.
 #
 # Kubernetes does not promise that a policy can block a pod's traffic to its own node
 # (networkpolicy-runners.yaml); the smoke test checks that this one does, on k3s's controller.
