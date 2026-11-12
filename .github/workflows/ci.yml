@@ -5,7 +5,9 @@ name: CI
 # smoke  the real stack on a GitHub-hosted runner: docker compose up, the node Ready, the
 #        manifests applied, the credential Secret created by scripts/register.sh, the controller
 #        chart installed through the proxy and running, the runner pod templates admitted by Pod
-#        Security "restricted", and the egress rules tested from a pod.
+#        Security "restricted", the egress rules tested from a pod, and the tenant namespaces: their
+#        permissions, admission's refusals, a certificate from scripts/tenant-cert.sh used
+#        through api-forward.yml, and a tenant pod's egress.
 #
 # What a hosted runner cannot show (README, "Status"): a scale set registering with GitHub and
 # running a job (that needs a real credential and a repository to register with), the runner
@@ -261,6 +263,104 @@ jobs:
           c=$(code --noproxy '*' "http://$GATEWAY:18080/"); echo "host port via the gateway, from the pod: $c"
           [ "$c" = 000 ]
           k -n arc-runners delete pod egress-test --wait=false
+
+      - name: The tenant namespaces
+        run: |
+          set -euo pipefail
+          k() { docker compose exec -T k3s kubectl "$@"; }
+          k apply -k /opt/arc-on-nas/manifests/tenants
+          u=opifex-magnus
+          # What the Role allows and refuses, asked as the user (the admin may impersonate).
+          can() { k auth can-i --as "$u" "$@" 2>/dev/null || true; }
+          for q in "-n zuul-trial create pods" "-n zuul-trial create pods --subresource=exec" \
+                   "-n build-farm create deployments.apps" "-n zuul-trial create secrets"; do
+            # shellcheck disable=SC2086 # $q is the question's words
+            a=$(can $q); echo "can $q: $a"; [ "$a" = yes ]
+          done
+          for q in "-n arc-runners list pods" "-n arc-systems get secrets" "list nodes" "list namespaces" \
+                   "list persistentvolumes" "create certificatesigningrequests" \
+                   "update certificatesigningrequests --subresource=approval" "-n zuul-trial create rolebindings" \
+                   "-n zuul-trial create roles" "-n zuul-trial patch networkpolicies" \
+                   "-n zuul-trial create endpoints" "-n zuul-trial create serviceaccounts --subresource=token" \
+                   "-n zuul-trial update resourcequotas" "impersonate users" \
+                   "-n zuul-trial update pods --subresource=ephemeralcontainers"; do
+            # shellcheck disable=SC2086 # $q is the question's words
+            a=$(can $q); echo "can $q: $a"; [ "$a" = no ]
+          done
+
+          # What admission refuses: each must fail, with the reason in its message.
+          refused() {
+            local why=$1; shift
+            if k --as "$u" -n zuul-trial "$@" --dry-run=server > /dev/null 2> "$RUNNER_TEMP/refused.txt"; then
+              echo "Admitted, but should be refused ($why): $*" >&2; exit 1
+            fi
+            grep -q "$why" "$RUNNER_TEMP/refused.txt" || { cat "$RUNNER_TEMP/refused.txt" >&2; exit 1; }
+            echo "refused ($why): $(head -c 160 "$RUNNER_TEMP/refused.txt")"
+          }
+          # A pod as JSON: $1 is added to its spec, $2 to its container.
+          pod() {
+            printf '{"apiVersion":"v1","kind":"Pod","metadata":{"name":"t"},"spec":{%s' "$1"
+            printf '"containers":[{"name":"t","image":"%s"%s}]}}' "$CURL_IMAGE" "$2"
+          }
+          refused 'violates PodSecurity "baseline' apply -f - <<< "$(pod '' ',"securityContext":{"privileged":true}')"
+          refused 'violates PodSecurity "baseline' apply -f - \
+            <<< "$(pod '"volumes":[{"name":"h","hostPath":{"path":"/"}}],' '')"
+          refused 'violates PodSecurity "baseline' apply -f - <<< "$(pod '"hostNetwork":true,' '')"
+          refused 'tenant namespaces allow only the volume types' apply -f - \
+            <<< "$(pod '"volumes":[{"name":"n","nfs":{"server":"'"$GATEWAY"'","path":"/"}}],' '')"
+          k -n zuul-trial create service clusterip ext --tcp=3128:3128 --dry-run=client -o json \
+            | jq '.spec.externalIPs = ["172.31.250.2"]' > "$RUNNER_TEMP/svc-ext.json"
+          refused 'tenant namespaces allow no Service with spec.externalIPs' apply -f - < "$RUNNER_TEMP/svc-ext.json"
+          refused 'services.nodeports' create service nodeport np --tcp=80:80
+          refused 'no-priority-class' apply -f - <<< "$(pod '"priorityClassName":"system-cluster-critical",' '')"
+          # And a plain pod is admitted, with a memory limit from the LimitRange.
+          k --as "$u" -n zuul-trial apply --dry-run=server \
+            -o jsonpath='{.spec.containers[0].resources.limits.memory}{"\n"}' -f - <<< "$(pod '' '')"
+
+          # A real certificate, through the forwarder, from a container on another network.
+          openssl ecparam -name prime256v1 -genkey -noout -out "$RUNNER_TEMP/tenant.key"
+          openssl req -new -key "$RUNNER_TEMP/tenant.key" -subj "/CN=$u/O=devinfra" -out "$RUNNER_TEMP/tenant.csr"
+          openssl req -new -key "$RUNNER_TEMP/tenant.key" -subj "/CN=$u/O=system:masters" -out "$RUNNER_TEMP/admin.csr"
+          if scripts/tenant-cert.sh "$u" "$RUNNER_TEMP/admin.csr" --out "$RUNNER_TEMP"; then
+            echo "tenant-cert.sh signed O=system:masters" >&2; exit 1
+          fi
+          scripts/tenant-cert.sh "$u" "$RUNNER_TEMP/tenant.csr" --namespace zuul-trial --out "$RUNNER_TEMP"
+          docker network create tenants-test
+          API_FORWARD_NETWORK=tenants-test docker compose -f api-forward.yml up -d --wait
+          yq '.clusters[0].cluster."certificate-authority-data"' "$RUNNER_TEMP/$u.kubeconfig" \
+            | base64 -d > "$RUNNER_TEMP/ca.crt"
+          api() {
+            docker run --rm -u "$(id -u)" --network tenants-test -v "$RUNNER_TEMP:/t:ro" "$CURL_IMAGE" \
+              -sS -o /dev/null \
+              -w '%{http_code}' -m 10 --cacert /t/ca.crt --cert "/t/$u.crt" --key /t/tenant.key \
+              --connect-to kubernetes:6443:k3s-api:6443 "https://kubernetes:6443$1" || true
+          }
+          c=$(api /api/v1/namespaces/zuul-trial/pods); echo "zuul-trial pods: $c"; [ "$c" = 200 ]
+          c=$(api /api/v1/namespaces/arc-runners/pods); echo "arc-runners pods: $c"; [ "$c" = 403 ]
+          c=$(api /api/v1/nodes); echo "nodes: $c"; [ "$c" = 403 ]
+          # Without a certificate: only health and version.
+          anon() {
+            docker run --rm -u "$(id -u)" --network tenants-test -v "$RUNNER_TEMP:/t:ro" "$CURL_IMAGE" \
+              -sS -o /dev/null \
+              -w '%{http_code}' -m 10 --cacert /t/ca.crt --connect-to kubernetes:6443:k3s-api:6443 \
+              "https://kubernetes:6443$1" || true
+          }
+          c=$(anon /api/v1/namespaces/zuul-trial/pods); echo "zuul-trial pods without a certificate: $c"
+          [ "$c" = 401 ]
+
+          # A tenant pod's egress: the proxy yes, the host through the gateway no.
+          python3 -m http.server 18081 --bind 0.0.0.0 > /dev/null 2>&1 &
+          k -n zuul-trial run egress-test --image="$CURL_IMAGE" --restart=Never --command -- sleep 600
+          k -n zuul-trial wait --for=condition=Ready pod/egress-test --timeout=180s
+          code() { k -n zuul-trial exec egress-test -- curl -sS -o /dev/null -m 10 -w '%{http_code}' "$@" || true; }
+          c=$(code -x "$PROXY" https://github.com/); echo "github.com through the proxy: $c"; [ "$c" = 200 ]
+          c=$(docker run --rm --network ci_runners "$CURL_IMAGE" \
+                -sS -o /dev/null -m 10 -w '%{http_code}' "http://$GATEWAY:18081/" || true)
+          echo "host port via the gateway, from a container on the network: $c"; [ "$c" = 200 ]
+          c=$(code --noproxy '*' "http://$GATEWAY:18081/"); echo "host port via the gateway, from the pod: $c"
+          [ "$c" = 000 ]
+          k -n zuul-trial delete pod egress-test --wait=false
+          docker compose -p ci-api down
 
       - name: The proxy saw the pulls
         run: |

@@ -1,0 +1,58 @@
+# The k3s API server, and nothing else, for clients on another Docker network: the users of the
+# tenant namespaces (README, "Tenant namespaces"). Optional, and a Compose project of its own, so
+# starting or removing it never touches the node:
+#
+#   API_FORWARD_NETWORK=<network> docker compose -f api-forward.yml up -d
+#   docker compose -p ci-api down
+#
+# <network> is an existing Docker network the clients are on. Clients reach the API server as
+# https://k3s-api:6443 on that network, through socat: one TCP port, forwarded byte for byte, so
+# TLS ends at the API server and the forwarder holds no credential. The API server's certificate
+# does not name k3s-api; a client's kubeconfig sets tls-server-name to "kubernetes", which it does.
+# The API server allows no anonymous requests beyond its health and version endpoints.
+#
+# On the stack network the forwarder only ever connects to the node's address and port below. Its
+# own address there is fixed, outside Docker's dynamic picks, so that it can never take the
+# node's or the proxy's address while those containers are stopped. If you change the stack
+# subnet (docker-compose.yml), change both addresses here too.
+name: ci-api
+
+services:
+  forward:
+    # socat 1.8 on Alpine, pinned by digest.
+    image: alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e
+    command:
+      - TCP4-LISTEN:6443,fork,reuseaddr,max-children=32
+      - TCP4:172.31.250.10:6443
+    restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.enable=false
+    user: "65534:65534"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    cpus: 0.25
+    mem_limit: 64m
+    pids_limit: 64
+    logging:
+      driver: local
+      options:
+        max-size: 1m
+        max-file: "2"
+    networks:
+      runners:
+        ipv4_address: 172.31.250.11
+      clients:
+        aliases:
+          - k3s-api
+
+networks:
+  # The stack network, created by docker-compose.yml (project "ci", network "runners").
+  runners:
+    external: true
+    name: ci_runners
+  clients:
+    external: true
+    name: ${API_FORWARD_NETWORK:?set API_FORWARD_NETWORK to the clients' Docker network}

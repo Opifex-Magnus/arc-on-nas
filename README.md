@@ -19,7 +19,7 @@ public repositories (see [Limitations](#limitations)), or for jobs that need Doc
 Contents: [Status](#status) · [How it works](#how-it-works) · [Security posture](#security-posture) ·
 [Requirements](#requirements) · [Quick start](#quick-start) · [Sizing](#sizing) ·
 [Adding a toolchain](#adding-a-toolchain) · [Adding a repository](#adding-a-repository) ·
-[Building the images](#building-the-images) · [Operations](#operations) ·
+[Tenant namespaces](#tenant-namespaces) · [Building the images](#building-the-images) · [Operations](#operations) ·
 [Troubleshooting](#troubleshooting) · [FAQ](#faq) · [Limitations](#limitations) ·
 [Layout](#repository-layout)
 
@@ -231,6 +231,10 @@ copy the controller mirrors into `arc-systems` for each scale set's listener (so
 `kubectl get secrets -A` lists it twice). k3s keeps Secrets in its
 SQLite datastore in the `k3s-data` volume, unencrypted unless you add `--secrets-encryption` to
 `K3S_EXTRA_ARGS`; root on the host can read it either way.
+
+**Tenant namespaces**, if you add them, are a second way into the cluster: users other than the
+admin, with certificates allowed their own namespaces, reaching the API server through a
+forwarder. What they can and cannot reach: [Tenant namespaces](#tenant-namespaces).
 
 Reporting a vulnerability: [SECURITY.md](SECURITY.md).
 
@@ -473,6 +477,102 @@ organisation and installed on it (`scripts/register.sh --app-id ... --installati
 --private-key-file ...`), with runner groups choosing the repositories. Workflows in any allowed
 repository use `runs-on: <name>` without touching the cluster. Repositories then share the scale
 set and therefore its cache claim; give untrusted-to-each-other repositories separate scale sets.
+
+## Tenant namespaces
+
+Optional. A tenant namespace is one that somebody other than the cluster admin deploys into:
+another project's trial, a build farm, an agent that measures what it builds. Each tenant user
+gets a client certificate that is allowed their namespaces and nothing else: no shell on the
+host, no admin kubeconfig, no other namespace. [`manifests/tenants/`](manifests/tenants) ships two,
+`zuul-trial` and `build-farm`, with two users; rename the directories and edit
+`base/rolebinding.yaml` for yours.
+
+| | A tenant user |
+|---|---|
+| Kubernetes API | in their namespaces only ([`base/role.yaml`](manifests/tenants/base/role.yaml)): pods (with logs, `exec`, `attach`, `port-forward`), Deployments, StatefulSets, ReplicaSets, DaemonSets, Jobs, CronJobs, Services, ConfigMaps, Secrets, PersistentVolumeClaims, ServiceAccounts, HorizontalPodAutoscalers, PodDisruptionBudgets, Leases; read-only events, endpoints, NetworkPolicies, the quota and limits, pod metrics. Nothing cluster-scoped, no Roles or RoleBindings, no `escalate`, `bind` or `impersonate`. Like every authenticated user, they may also read the API's discovery documents and ask what they are allowed. |
+| Pods | Pod Security `baseline` enforced, `restricted` warned about and audited: no privileged containers, no host network, PID or IPC namespace, no `hostPath`, no host ports, no capabilities beyond the runtime's defaults. Only the volume types `restricted` allows, and no Service with `externalIPs` ([`admission.yaml`](manifests/tenants/admission.yaml), which says why). No PriorityClass, so a tenant's pod never preempts a runner. |
+| Network | In: only from the namespace's own pods, so not from the runners or other tenants. Out: the internet through the proxy, and pods and Services in the cluster subject to their namespace's own policies; not the host, the node's addresses or anything else on the stack network ([`base/networkpolicy.yaml`](manifests/tenants/base/networkpolicy.yaml)). A tenant cannot change these policies. |
+| Resources | A `ResourceQuota` and a `LimitRange` per namespace (`<tenant>/quota.yaml`): CPU and memory requests and limits, counts of pods, Services, claims, Secrets and ConfigMaps, no NodePorts or load balancers, and a default memory limit for every container that names none. |
+| Reaching the API | Through the forwarder in [`api-forward.yml`](api-forward.yml): port 6443 of the node, and nothing else, on a Docker network of your choice. |
+
+**Sizing.** A tenant's requests compete with the runners for the node's allocatable; its limits
+compete for the k3s container's memory. The rule: the tenants' `requests.memory` plus the
+runners' requests at their peak plus the system pods stay within allocatable, so the tenants never
+keep a runner `Pending` for long; the tenants' `limits.memory` are what they may use when memory is
+free, and when it is not, the kernel's OOM killer inside the container picks pods with small
+requests first, which are theirs. The shipped quotas are the repository owner's host's (allocatable
+14 GiB, runners peaking at about 8 GiB of requests): `zuul-trial` 1.5 CPU and 2 GiB of requests, 4
+CPUs and 6 GiB of limits; `build-farm` 2 CPUs and 3 GiB, 6 CPUs and 8 GiB. Recompute them for
+yours.
+
+**Disk is not bounded per tenant.** Quotas count claims and their requested sizes. local-path
+(k3s's default StorageClass) does not enforce a claim's size, and on a host that runs the kubelet
+with `--kubelet-arg=local-storage-capacity-isolation=false` (the way out when the kubelet cannot
+measure its filesystem, as on some ZFS hosts) neither are `emptyDir` sizes nor a container's
+writable layer. A tenant can fill the filesystems under the node's
+`/var/lib/kubelet` (every pod's `emptyDir`, the runners' workspaces among them) and
+`/var/lib/rancher/k3s` (images, local-path volumes). Give those their own filesystems with quotas
+if that matters.
+
+**Applying it**, once, and after every change to `manifests/tenants/`:
+
+```sh
+docker compose exec k3s kubectl apply -k /opt/arc-on-nas/manifests/tenants
+API_FORWARD_NETWORK=<network> docker compose -f api-forward.yml up -d
+```
+
+`<network>` is an existing Docker network the tenants' machines or containers are on; they reach
+the API server there as `https://k3s-api:6443`. Everything on that network can then reach the
+API server's port; it needs a certificate for anything but its health and version endpoints.
+Removing it again: `docker compose -p ci-api down` and
+`docker compose exec k3s kubectl delete -k /opt/arc-on-nas/manifests/tenants`, which deletes the
+namespaces and everything in them.
+
+**Issuing a user's certificate.** No secret moves: the user makes the key and keeps it, and
+sends only a certificate request for their user name:
+
+```sh
+# On the user's machine. The key stays there, in a secret store.
+openssl ecparam -name prime256v1 -genkey -noout -out tenant.key
+openssl req -new -key tenant.key -subj "/CN=<user>/O=devinfra" -out tenant.csr
+```
+
+On the host, [`scripts/tenant-cert.sh`](scripts/tenant-cert.sh) checks the request's subject,
+submits it to k3s's `kubernetes.io/kube-apiserver-client` signer for 90 days, approves it, and
+writes `<user>.crt` and a `<user>.kubeconfig` that holds no key:
+
+```sh
+scripts/tenant-cert.sh <user> tenant.csr --namespace zuul-trial
+```
+
+Never approve such a request by hand without reading its subject: the signer signs whatever
+subject it is given, and a request for `O=system:masters` would come back as a cluster-admin
+certificate. The script refuses anything but `CN=<user>` and `O=devinfra` (`--org` for another).
+Send both files back; neither is secret. The kubeconfig's user runs a credential plugin,
+`tenant-credential` next to it, that prints the certificate and the key for kubectl, so that the
+key never needs to be a file. For example, with the two in a secret store that has a command
+line (`jq` builds the JSON):
+
+```sh
+#!/bin/sh
+# ~/.kube/tenant-credential
+set -eu
+jq -n --arg cert "$(secret-store get k3s-cert)" --arg key "$(secret-store get k3s-key)" \
+  '{apiVersion: "client.authentication.k8s.io/v1", kind: "ExecCredential",
+    status: {clientCertificateData: ($cert + "\n"), clientKeyData: ($key + "\n")}}'
+```
+
+**Renewing** is the same with a new request, before the 90 days end
+(`openssl x509 -in <user>.crt -noout -enddate`). **Revoking:** k3s cannot revoke a client
+certificate, so remove the user from `base/rolebinding.yaml` and apply (or, at once,
+`kubectl -n <namespace> delete rolebinding tenant`); the certificate then still authenticates
+but is allowed nothing.
+
+**What stays with the admin**, done by hand on the host, because each is cluster-scoped or
+outside the cluster: PersistentVolumes (a hostPath volume for a tenant's cache, say), CRDs and
+cluster roles a tenant's software asks for, the host's directories and their quotas, PriorityClasses,
+and this directory. Give a PersistentVolume made for a tenant a `claimRef` naming that
+namespace and claim: an unclaimed volume binds to any claim that fits, in any namespace.
 
 ## Building the images
 
@@ -820,10 +920,11 @@ change recreates the node, every pod restarts and the running job fails. Drain f
 | Path | What |
 |---|---|
 | `docker-compose.yml`, `.env.example`, `squid.conf` | The stack: the node, the proxy, the Helm client. |
-| `manifests/` | Namespaces with Pod Security labels, NetworkPolicies, the cache volume and claim. |
+| `manifests/` | Namespaces with Pod Security labels, NetworkPolicies, the cache volume and claim; `manifests/tenants/`, the tenant namespaces. |
+| `api-forward.yml` | The optional forwarder to the API server for tenant users. |
 | `helm/` | Values for the controller and the `swift`, `ubuntu` and `browser` scale sets. |
 | `images/` | The runner images. |
-| `scripts/` | `preflight.sh`, `trial.sh`, `register.sh`, `warm.sh`, `prune-cache.sh`; `lint.sh` and `check-consistency.sh` for development. |
+| `scripts/` | `preflight.sh`, `trial.sh`, `register.sh`, `tenant-cert.sh`, `warm.sh`, `prune-cache.sh`; `lint.sh` and `check-consistency.sh` for development. |
 | `examples/workflow.yml` | A consumer repository's workflow. |
 | `.github/workflows/` | This repository's CI (lint and the smoke test) and the image builds. |
 

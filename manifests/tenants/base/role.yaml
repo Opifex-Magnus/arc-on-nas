@@ -1,0 +1,74 @@
+# What a tenant may do in its namespace: run and inspect workloads, with their configuration,
+# Secrets, storage claims and Services. Namespaced resources only; a Role cannot grant anything
+# cluster-scoped (nodes, namespaces, PersistentVolumes, CertificateSigningRequests, PriorityClasses,
+# CRDs), and this one grants nothing in another namespace.
+#
+# Deliberately left out:
+#   roles, rolebindings, and the escalate, bind and impersonate verbs: a tenant cannot give itself
+#     or a ServiceAccount more than this, and cannot act as another user.
+#   networkpolicies (read only): the policies in networkpolicy.yaml are what keeps other
+#     namespaces' pods out and the tenant's pods off the host. Policies add up, so a tenant that
+#     could write one could allow what these deny.
+#   resourcequotas, limitranges (read only): the namespace's budget.
+#   endpoints, endpointslices (read only): written by hand, they send a Service's traffic to any
+#     address (CVE-2021-25740); Kubernetes' own "edit" role leaves them out for that reason.
+#   serviceaccounts/token: a token for one of the namespace's ServiceAccounts, which have no
+#     permissions anyway; pods get theirs projected without it.
+#   pods/ephemeralcontainers, */status, pods/eviction, ingresses: not needed (no ingress
+#     controller runs: docker-compose.yml disables Traefik).
+# Pod Security (the namespace's labels) and admission.yaml decide what a pod may contain.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: tenant
+rules:
+  - apiGroups: [""]
+    resources: [pods, services, configmaps, secrets, persistentvolumeclaims, serviceaccounts]
+    verbs: [get, list, watch, create, update, patch, delete, deletecollection]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get, list, watch]
+  # kubectl exec, attach and port-forward: `create` for the request, `get` for the WebSocket
+  # upgrade kubectl 1.30 and later uses.
+  - apiGroups: [""]
+    resources: [pods/exec, pods/attach, pods/portforward]
+    verbs: [get, create]
+  - apiGroups: [""]
+    resources: [events, endpoints, resourcequotas, limitranges]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources:
+      - deployments
+      - deployments/scale
+      - statefulsets
+      - statefulsets/scale
+      - replicasets
+      - replicasets/scale
+      - daemonsets
+    verbs: [get, list, watch, create, update, patch, delete, deletecollection]
+  - apiGroups: [batch]
+    resources: [jobs, cronjobs]
+    verbs: [get, list, watch, create, update, patch, delete, deletecollection]
+  - apiGroups: [autoscaling]
+    resources: [horizontalpodautoscalers]
+    verbs: [get, list, watch, create, update, patch, delete, deletecollection]
+  - apiGroups: [policy]
+    resources: [poddisruptionbudgets]
+    verbs: [get, list, watch, create, update, patch, delete, deletecollection]
+  # Leader election, for workloads that run more than one replica of a controller.
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete, deletecollection]
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies]
+    verbs: [get, list, watch]
+  - apiGroups: [discovery.k8s.io]
+    resources: [endpointslices]
+    verbs: [get, list, watch]
+  - apiGroups: [events.k8s.io]
+    resources: [events]
+    verbs: [get, list, watch]
+  # `kubectl top pods`, from k3s's bundled metrics-server.
+  - apiGroups: [metrics.k8s.io]
+    resources: [pods]
+    verbs: [get, list, watch]

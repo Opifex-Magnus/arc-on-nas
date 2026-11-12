@@ -1,0 +1,15 @@
+# Pod Security "baseline" is enforced, so a tenant's pod cannot reach the host: no privileged
+# containers, no host network, PID or IPC namespace, no hostPath volumes, no host ports, no added
+# capabilities beyond the container runtime's defaults. "restricted" is warned about and audited,
+# not enforced, so that images which run as root still start. ../admission.yaml adds what
+# "baseline" leaves out (network volumes, Services with external IPs) for every namespace with
+# the label arc-on-nas/tenant.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: build-farm
+  labels:
+    arc-on-nas/tenant: "true"
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted

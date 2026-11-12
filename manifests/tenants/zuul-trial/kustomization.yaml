@@ -1,0 +1,8 @@
+# The tenant namespace zuul-trial: a trial of Zuul (the gate and its executors).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: zuul-trial
+resources:
+  - namespace.yaml
+  - quota.yaml
+  - ../base

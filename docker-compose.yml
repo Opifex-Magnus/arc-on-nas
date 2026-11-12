@@ -11,8 +11,9 @@
 #
 # Addresses on the stack network are fixed because pods cannot resolve Docker's container names.
 # If 172.31.250.0/24 collides with something on your host, change it here and in squid.conf,
-# manifests/networkpolicy-runners.yaml, helm/*.yaml, scripts/preflight.sh and
-# .github/workflows/ci.yml; scripts/check-consistency.sh checks that they agree.
+# manifests/networkpolicy-runners.yaml, manifests/tenants/base/networkpolicy.yaml, helm/*.yaml,
+# api-forward.yml, scripts/preflight.sh and .github/workflows/ci.yml;
+# scripts/check-consistency.sh checks that they agree.
 
 name: ci
 

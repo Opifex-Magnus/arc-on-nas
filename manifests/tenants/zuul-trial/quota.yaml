@@ -1,0 +1,47 @@
+# The namespace's budget (README, "Tenant namespaces", for the arithmetic). Requests are what the
+# scheduler admits against the node's allocatable, so they are kept small enough to fit beside
+# the runners at their peak; limits are what a pod may use when memory is free, and the k3s
+# container's own cap bounds them all. Every container gets a memory limit from the LimitRange
+# below when it names none.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: budget
+spec:
+  hard:
+    requests.cpu: "1500m"
+    limits.cpu: "4"
+    requests.memory: 2Gi
+    limits.memory: 6Gi
+    pods: "20"
+    services: "10"
+    # A NodePort answers on the node's addresses, where traffic from other namespaces' pods
+    # arrives as the node's own and passes their ingress policies; there is no load balancer.
+    services.nodeports: "0"
+    services.loadbalancers: "0"
+    configmaps: "50"
+    secrets: "50"
+    persistentvolumeclaims: "5"
+    # Every claim's requested size together, whatever binds it: a PersistentVolume made for this
+    # namespace by hand (README, "Tenant namespaces") or local-path.
+    requests.storage: 10Gi
+    # local-path, k3s's default StorageClass, makes a directory on the node for each claim and
+    # does not enforce its size: this counts requests, not bytes on disk.
+    local-path.storageclass.storage.k8s.io/requests.storage: 4Gi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: defaults
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: "1"
+        memory: 512Mi
+      defaultRequest:
+        cpu: 100m
+        memory: 128Mi
+      max:
+        cpu: "2"
+        memory: 4Gi

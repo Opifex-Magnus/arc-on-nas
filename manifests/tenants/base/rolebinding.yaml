@@ -1,0 +1,23 @@
+# The tenant's users: the common name (CN) of their client certificates, issued by k3s's
+# kubernetes.io/kube-apiserver-client signer (README, "Tenant namespaces"). Bound by user name,
+# never by group: the certificate's organisation (O) is a group, and a group binding would cover
+# every certificate anyone gets signed with that O.
+#
+# k3s cannot revoke a client certificate. To revoke a user, remove them here (or delete the
+# binding); the certificate then authenticates but is allowed nothing beyond the discovery and
+# self-review requests every authenticated user has.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: tenant
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: tenant
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: opifex-magnus
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: t3c-artifex-prime

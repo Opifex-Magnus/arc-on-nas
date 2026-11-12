@@ -1,0 +1,74 @@
+# Two checks for tenant namespaces (the label arc-on-nas/tenant) that Pod Security "baseline"
+# does not make, as ValidatingAdmissionPolicies: built into the API server, no webhook to run.
+# Both refuse the request with the message below. They match nothing outside tenant namespaces.
+#
+# tenant-pod-volumes: only the volume types Pod Security "restricted" allows. "baseline" refuses
+#   hostPath but allows the network volume types (nfs, iscsi, cephfs, rbd, glusterfs and others),
+#   which the node mounts in its own network namespace, the host's: an NFS export on the host or
+#   the LAN would become a pod's volume, past every NetworkPolicy.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: tenant-pod-volumes
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [pods]
+  validations:
+    - expression: >-
+        !has(object.spec.volumes) || object.spec.volumes.all(v,
+        has(v.configMap) || has(v.csi) || has(v.downwardAPI) || has(v.emptyDir) ||
+        has(v.ephemeral) || has(v.persistentVolumeClaim) || has(v.projected) || has(v.secret))
+      message: >-
+        tenant namespaces allow only the volume types of Pod Security "restricted": configMap,
+        csi, downwardAPI, emptyDir, ephemeral, persistentVolumeClaim, projected, secret
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: tenant-pod-volumes
+spec:
+  policyName: tenant-pod-volumes
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        arc-on-nas/tenant: "true"
+---
+# tenant-service-external-ips: no Service with spec.externalIPs. Any Service may claim any address
+# as an external IP, and kube-proxy then sends the whole cluster's traffic for that address and
+# port to the Service's pods (CVE-2020-8554): a tenant could take over the proxy's address, and
+# with it every runner's traffic to the internet. The API server's DenyServiceExternalIPs
+# admission plugin would refuse them cluster-wide; this refuses them in tenant namespaces only,
+# without a k3s flag or restart.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: tenant-service-external-ips
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [services]
+  validations:
+    - expression: "!has(object.spec.externalIPs) || size(object.spec.externalIPs) == 0"
+      message: tenant namespaces allow no Service with spec.externalIPs
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: tenant-service-external-ips
+spec:
+  policyName: tenant-service-external-ips
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        arc-on-nas/tenant: "true"

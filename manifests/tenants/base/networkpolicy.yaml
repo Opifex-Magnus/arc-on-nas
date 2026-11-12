@@ -1,0 +1,49 @@
+# k3s enforces NetworkPolicy with its embedded controller; nothing to install. A tenant cannot
+# change these (base/role.yaml).
+#
+# Ingress: only from pods in the same namespace. Not from other namespaces, and so not from the
+# runners. The kubelet's probes come from the node and are always allowed.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: same-namespace-ingress
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector: {}
+---
+# Egress: open, except for the stack network and the node's own addresses. The stack network
+# (docker-compose.yml) is internal, so what it holds is the host (its gateway, and through it
+# every port the host listens on), the node (the API server, the kubelet, every NodePort) and
+# the proxy; the internet is reachable only through the proxy, which the second rule allows.
+# Everything in the cluster's pod and service ranges stays reachable, subject to the other
+# namespaces' own ingress policies.
+#
+#   10.42.0.0/32, 10.42.0.1/32  the node's flannel and cni0 addresses on a one-node cluster with
+#                               k3s's default pod range: NodePorts answer on them too.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: egress-not-host
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 172.31.250.0/24
+              - 10.42.0.0/32
+              - 10.42.0.1/32
+    - to:
+        # The proxy's fixed address on the stack network (docker-compose.yml).
+        - ipBlock:
+            cidr: 172.31.250.2/32
+      ports:
+        - protocol: TCP
+          port: 3128

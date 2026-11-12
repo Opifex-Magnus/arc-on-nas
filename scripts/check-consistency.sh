@@ -28,6 +28,14 @@ for f in helm/swift.yaml helm/ubuntu.yaml helm/browser.yaml; do
 done
 node=$(sed -n '/^  k3s:/,/^  [a-z]/{s/^ *ipv4_address: *\([0-9.]*\).*/\1/p}' docker-compose.yml)
 grep -q -- "--node-ip=$node$" docker-compose.yml || problem "docker-compose.yml: --node-ip is not the k3s service's ipv4_address $node"
+# The tenant namespaces' egress policy and the API forwarder (README, "Tenant namespaces").
+tenant_policy=manifests/tenants/base/networkpolicy.yaml
+grep -q "cidr: $proxy/32" "$tenant_policy" || problem "$tenant_policy: the proxy's ipBlock is not $proxy/32"
+grep -q -- "- $subnet$" "$tenant_policy" || problem "$tenant_policy: the stack subnet $subnet is not excepted"
+grep -q -- "- TCP4:$node:6443$" api-forward.yml || problem "api-forward.yml: the forwarder's target is not $node:6443"
+forward=$(sed -n 's/^ *ipv4_address: *\([0-9.]*\).*/\1/p' api-forward.yml)
+[ "${forward%.*}.0/24" = "$subnet" ] || problem "api-forward.yml: the forwarder's address $forward is not in $subnet"
+if [ "$forward" = "$node" ] || [ "$forward" = "$proxy" ]; then problem "api-forward.yml: $forward is taken"; fi
 grep -q "^subnet=$subnet$" scripts/preflight.sh || problem "scripts/preflight.sh: subnet is not $subnet"
 grep -q "NO_PROXY: .*,$subnet," docker-compose.yml || problem "docker-compose.yml: NO_PROXY does not include $subnet"
 gateway=$(sed -n 's/^ *gateway: *\([0-9.]*\).*/\1/p' docker-compose.yml)

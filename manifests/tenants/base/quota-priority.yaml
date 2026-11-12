@@ -1,0 +1,16 @@
+# No tenant pod may name a PriorityClass. The cluster's classes (system-cluster-critical,
+# system-node-critical, and any an operator adds for CI) would let a tenant's pod preempt the
+# runners or the system pods; without one a pod has priority 0, the same as the runners, and the
+# scheduler preempts nothing for it. If a PriorityClass is ever made globalDefault, every pod gets
+# it and this quota refuses all tenant pods: give that class to the tenants explicitly instead.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: no-priority-class
+spec:
+  hard:
+    pods: "0"
+  scopeSelector:
+    matchExpressions:
+      - scopeName: PriorityClass
+        operator: Exists

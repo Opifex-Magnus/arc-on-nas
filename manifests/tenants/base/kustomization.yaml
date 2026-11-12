@@ -1,0 +1,8 @@
+# What every tenant namespace gets. The tenant's own kustomization.yaml sets the namespace.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - role.yaml
+  - rolebinding.yaml
+  - networkpolicy.yaml
+  - quota-priority.yaml
