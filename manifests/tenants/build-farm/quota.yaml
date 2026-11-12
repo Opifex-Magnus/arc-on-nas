@@ -10,16 +10,29 @@ metadata:
 spec:
   hard:
     requests.cpu: "2"
-    limits.cpu: "6"
+    # CPU limits only throttle; the k3s container's CPU cap and weight are what protect the host.
+    limits.cpu: "12"
     requests.memory: 3Gi
     limits.memory: 8Gi
     pods: "30"
     services: "10"
-    # A NodePort answers on the node's addresses, where traffic from other namespaces' pods
-    # arrives as the node's own and passes their ingress policies; there is no load balancer.
+    # A NodePort answers on every address of the node, outside the namespace's NetworkPolicies;
+    # there is no load balancer.
     services.nodeports: "0"
     services.loadbalancers: "0"
     configmaps: "50"
+    # Every object is a row in k3s's datastore, which the runners need too: a bound on each kind.
+    count/deployments.apps: "20"
+    # Each Deployment keeps up to 10 old ReplicaSets by default.
+    count/replicasets.apps: "250"
+    count/statefulsets.apps: "10"
+    count/daemonsets.apps: "5"
+    count/jobs.batch: "50"
+    count/cronjobs.batch: "10"
+    count/horizontalpodautoscalers.autoscaling: "10"
+    count/poddisruptionbudgets.policy: "10"
+    count/leases.coordination.k8s.io: "20"
+    count/serviceaccounts: "20"
     secrets: "50"
     persistentvolumeclaims: "5"
     # Every claim's requested size together, whatever binds it: a PersistentVolume made for this

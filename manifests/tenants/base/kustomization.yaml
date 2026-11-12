@@ -1,8 +1,9 @@
-# What every tenant namespace gets. The tenant's own kustomization.yaml sets the namespace.
+# What every tenant namespace gets. The tenant's own kustomization.yaml sets the namespace. The
+# RoleBinding comes last (../kustomization.yaml applies in this order).
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
-  - role.yaml
-  - rolebinding.yaml
   - networkpolicy.yaml
   - quota-priority.yaml
+  - role.yaml
+  - rolebinding.yaml

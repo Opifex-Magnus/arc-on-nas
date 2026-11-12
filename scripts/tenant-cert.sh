@@ -15,12 +15,13 @@
 #                         the forwarder in api-forward.yml)
 #   --namespace NS        the kubeconfig context's namespace (default: none)
 #   --exec-command CMD    the kubeconfig's credential plugin, which prints the user's certificate
-#                         and key; a relative path is relative to the kubeconfig's directory
-#                         (default ./tenant-credential)
+#                         and key; a relative path with a "/" is relative to the kubeconfig's
+#                         directory, a bare name is looked up on PATH (default ./tenant-credential)
 #   --out DIR             where USER.crt and USER.kubeconfig go (default .)
 #
-# It refuses a request whose subject is anything but CN=USER plus at most one O=ORG: a request
-# for O=system:masters, say, signed by this signer, would be a cluster-admin certificate.
+# It refuses a request whose subject is anything but CN=USER plus at most one O=ORG, or that
+# carries attributes or extensions: a request for O=system:masters, say, signed by this signer,
+# would be a cluster-admin certificate.
 # Run from anywhere, as a user that may run docker (or DOCKER="sudo docker"); needs openssl.
 set -euo pipefail
 
@@ -54,29 +55,42 @@ csr=${args[1]}
 [[ "$user" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] || { echo "USER must be a DNS label: $user" >&2; exit 2; }
 [[ "$days" =~ ^[0-9]+$ ]] && [ "$days" -ge 1 ] || { echo "--days must be a positive number" >&2; exit 2; }
 [[ "$org" != system:* ]] || { echo "--org may not be a system: group" >&2; exit 2; }
+[[ "$org" =~ ^[a-z0-9][-a-z0-9.]*$ ]] || { echo "--org must be lowercase letters, digits, - and ." >&2; exit 2; }
+server_re='^https://[][A-Za-z0-9.:-]+$'
+[[ "$server" =~ $server_re ]] || { echo "--server must be https://HOST[:PORT]" >&2; exit 2; }
+[ -z "$namespace" ] || [[ "$namespace" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] \
+  || { echo "--namespace must be a namespace name" >&2; exit 2; }
+[[ "$exec_command" =~ ^[A-Za-z0-9._/~-]+$ ]] || { echo "--exec-command must be a plain path" >&2; exit 2; }
 [ -r "$csr" ] || { echo "Cannot read $csr" >&2; exit 1; }
 command -v openssl >/dev/null || { echo "openssl is needed" >&2; exit 1; }
 
 kubectl() { "${docker[@]}" compose --project-directory "$root" exec -T k3s kubectl "$@"; }
 
-# The request's signature, then its subject, one attribute per line.
-openssl req -in "$csr" -noout -verify 2>/dev/null \
-  || { echo "$csr is not a certificate request with a valid signature" >&2; exit 1; }
-subject=$(openssl req -in "$csr" -noout -subject -nameopt sep_multiline,sname,utf8 | sed '1d; s/^ *//')
-echo "Request subject:"
-printf '  %s\n' "$subject"
-cn_count=0
-while IFS= read -r rdn; do
-  case "$rdn" in
-    "CN=$user") cn_count=$((cn_count + 1)) ;;
-    "O=$org") ;;
-    *) echo "Refused: the subject may hold only CN=$user and O=$org, not $rdn" >&2; exit 1 ;;
+# The request is checked and submitted as one set of bytes: OpenSSL's re-encoding of the first
+# request in the file, so that what the API server parses is what was checked here.
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+openssl req -in "$csr" -outform PEM -out "$work/request.pem" 2>/dev/null \
+  || { echo "$csr is not a certificate request" >&2; exit 1; }
+check_request() {
+  openssl req -in "$1" -noout -verify >/dev/null 2>&1 \
+    || { echo "Refused: not a certificate request with a valid signature" >&2; return 1; }
+  # RFC 2253 form: one line, special characters escaped, a multi-valued RDN joined with "+".
+  local subject
+  subject=$(openssl req -in "$1" -noout -subject -nameopt RFC2253 | sed 's/^subject=//')
+  echo "Request subject: $subject"
+  case "$subject" in
+    "CN=$user"|"CN=$user,O=$org"|"O=$org,CN=$user") ;;
+    *) echo "Refused: the subject must be CN=$user, O=$org and nothing else" >&2; return 1 ;;
   esac
-done <<< "$subject"
-[ "$cn_count" -eq 1 ] || { echo "Refused: the subject needs exactly one CN=$user" >&2; exit 1; }
-if [ "$(printf '%s\n' "$subject" | grep -c '^O=')" -gt 1 ]; then
-  echo "Refused: more than one O" >&2; exit 1
-fi
+  # No attributes and no requested extensions (the signer copies subject alternative names).
+  local extra
+  extra=$(openssl req -in "$1" -noout -text \
+    | awk '/^ *Attributes:/ {f = 1; next} /^ *Signature Algorithm:/ {f = 0} f' \
+    | sed 's/^ *//' | grep -v -x -e '(none)' -e 'Requested Extensions:' -e '' || true)
+  [ -z "$extra" ] || { echo "Refused: the request carries attributes or extensions: $extra" >&2; return 1; }
+}
+check_request "$work/request.pem" || exit 1
 
 # Bound anywhere? Not required, but a certificate for nobody is likely a typo.
 bindings=$(kubectl get rolebindings -A \
@@ -89,7 +103,7 @@ else
 fi
 
 name="tenant-$user-$(date -u +%Y%m%d-%H%M%S)"
-request=$(base64 < "$csr" | tr -d '\n')
+request=$(base64 < "$work/request.pem" | tr -d '\n')
 kubectl apply -f - >/dev/null <<YAML
 apiVersion: certificates.k8s.io/v1
 kind: CertificateSigningRequest
@@ -102,6 +116,13 @@ spec:
   usages:
     - client auth
 YAML
+# What the API server stored is what is approved: decode it and check it once more.
+kubectl get csr "$name" -o jsonpath='{.spec.request}' | base64 -d > "$work/stored.pem"
+if ! cmp -s "$work/request.pem" "$work/stored.pem" || ! check_request "$work/stored.pem" >/dev/null; then
+  kubectl delete csr "$name" >/dev/null
+  echo "Refused: the stored request differs from the checked one; deleted $name" >&2
+  exit 1
+fi
 kubectl certificate approve "$name" >/dev/null
 cert=""
 for _ in $(seq 1 30); do

@@ -490,8 +490,8 @@ host, no admin kubeconfig, no other namespace. [`manifests/tenants/`](manifests/
 | | A tenant user |
 |---|---|
 | Kubernetes API | in their namespaces only ([`base/role.yaml`](manifests/tenants/base/role.yaml)): pods (with logs, `exec`, `attach`, `port-forward`), Deployments, StatefulSets, ReplicaSets, DaemonSets, Jobs, CronJobs, Services, ConfigMaps, Secrets, PersistentVolumeClaims, ServiceAccounts, HorizontalPodAutoscalers, PodDisruptionBudgets, Leases; read-only events, endpoints, NetworkPolicies, the quota and limits, pod metrics. Nothing cluster-scoped, no Roles or RoleBindings, no `escalate`, `bind` or `impersonate`. Like every authenticated user, they may also read the API's discovery documents and ask what they are allowed. |
-| Pods | Pod Security `baseline` enforced, `restricted` warned about and audited: no privileged containers, no host network, PID or IPC namespace, no `hostPath`, no host ports, no capabilities beyond the runtime's defaults. Only the volume types `restricted` allows, and no Service with `externalIPs` ([`admission.yaml`](manifests/tenants/admission.yaml), which says why). No PriorityClass, so a tenant's pod never preempts a runner. |
-| Network | In: only from the namespace's own pods, so not from the runners or other tenants. Out: the internet through the proxy, and pods and Services in the cluster subject to their namespace's own policies; not the host, the node's addresses or anything else on the stack network ([`base/networkpolicy.yaml`](manifests/tenants/base/networkpolicy.yaml)). A tenant cannot change these policies. |
+| Pods | Pod Security `baseline` enforced, `restricted` warned about and audited: no privileged containers, no host network, PID or IPC namespace, no `hostPath`, no host ports, no capabilities beyond the runtime's defaults. On top of that ([`admission.yaml`](manifests/tenants/admission.yaml), which says why): every container drops `NET_RAW` (added for pods that do not), only `restricted`'s volume types without `csi`, images only from registries on the internet (not localhost, an IP address or a cluster Service), and no Service with `externalIPs`. No PriorityClass, so a tenant's pod never preempts a runner. Unlike the runners, tenant pods may run as root and without a seccomp profile: images that need that (a sandbox that makes user namespaces, say) still run, at the price of more of the kernel within reach of a pod on a privileged node. |
+| Network | In: only from the namespace's own pods, so not from the runners or other tenants. Out: the internet through the proxy, and pods and Services in the cluster subject to their namespace's own policies; not the host, the node's addresses (so neither its NodePorts nor the API server, also through its Service) or anything else on the stack network ([`base/networkpolicy.yaml`](manifests/tenants/base/networkpolicy.yaml)). A tenant cannot change these policies. The node's own image pulls are outside them, which is why images must come from the internet. |
 | Resources | A `ResourceQuota` and a `LimitRange` per namespace (`<tenant>/quota.yaml`): CPU and memory requests and limits, counts of pods, Services, claims, Secrets and ConfigMaps, no NodePorts or load balancers, and a default memory limit for every container that names none. |
 | Reaching the API | Through the forwarder in [`api-forward.yml`](api-forward.yml): port 6443 of the node, and nothing else, on a Docker network of your choice. |
 
@@ -501,9 +501,11 @@ runners' requests at their peak plus the system pods stay within allocatable, so
 keep a runner `Pending` for long; the tenants' `limits.memory` are what they may use when memory is
 free, and when it is not, the kernel's OOM killer inside the container picks pods with small
 requests first, which are theirs. The shipped quotas are the repository owner's host's (allocatable
-14 GiB, runners peaking at about 8 GiB of requests): `zuul-trial` 1.5 CPU and 2 GiB of requests, 4
-CPUs and 6 GiB of limits; `build-farm` 2 CPUs and 3 GiB, 6 CPUs and 8 GiB. Recompute them for
-yours.
+14 GiB, runners peaking at about 8 GiB of requests): `zuul-trial` 1.5 CPU and 2 GiB of requests, 16
+CPUs and 6 GiB of limits; `build-farm` 2 CPUs and 3 GiB, 12 CPUs and 8 GiB. CPU limits only
+throttle a pod, and the k3s container's CPU cap and weight keep the host's share, so they are
+generous. Each quota also bounds the number of objects of every kind a tenant may create, since
+each one is a row in k3s's datastore, which the runners need too. Recompute them for yours.
 
 **Disk is not bounded per tenant.** Quotas count claims and their requested sizes. local-path
 (k3s's default StorageClass) does not enforce a claim's size, and on a host that runs the kubelet
@@ -523,7 +525,8 @@ API_FORWARD_NETWORK=<network> docker compose -f api-forward.yml up -d
 
 `<network>` is an existing Docker network the tenants' machines or containers are on; they reach
 the API server there as `https://k3s-api:6443`. Everything on that network can then reach the
-API server's port; it needs a certificate for anything but its health and version endpoints.
+API server's port; k3s allows no anonymous request, so without a certificate every path answers
+401.
 Removing it again: `docker compose -p ci-api down` and
 `docker compose exec k3s kubectl delete -k /opt/arc-on-nas/manifests/tenants`, which deletes the
 namespaces and everything in them.

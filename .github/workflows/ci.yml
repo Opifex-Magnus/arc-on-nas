@@ -68,6 +68,7 @@ jobs:
       PROXY: http://172.31.250.2:3128
       GATEWAY: 172.31.250.1
       CURL_IMAGE: curlimages/curl:8.22.0@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777
+      BUSYBOX_IMAGE: busybox:1.37.0@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -270,20 +271,24 @@ jobs:
           k() { docker compose exec -T k3s kubectl "$@"; }
           k apply -k /opt/arc-on-nas/manifests/tenants
           u=opifex-magnus
-          # What the Role allows and refuses, asked as the user (the admin may impersonate).
-          can() { k auth can-i --as "$u" "$@" 2>/dev/null || true; }
+          # What the Role allows and refuses, asked as the user with the group of their certificate.
+          can() { k auth can-i --as "$u" --as-group devinfra "$@" 2>/dev/null || true; }
           for q in "-n zuul-trial create pods" "-n zuul-trial create pods --subresource=exec" \
                    "-n build-farm create deployments.apps" "-n zuul-trial create secrets"; do
             # shellcheck disable=SC2086 # $q is the question's words
             a=$(can $q); echo "can $q: $a"; [ "$a" = yes ]
           done
           for q in "-n arc-runners list pods" "-n arc-systems get secrets" "list nodes" "list namespaces" \
-                   "list persistentvolumes" "create certificatesigningrequests" \
+                   "list persistentvolumes" "create persistentvolumes" "patch namespaces" \
+                   "create certificatesigningrequests" \
                    "update certificatesigningrequests --subresource=approval" "-n zuul-trial create rolebindings" \
                    "-n zuul-trial create roles" "-n zuul-trial patch networkpolicies" \
-                   "-n zuul-trial create endpoints" "-n zuul-trial create serviceaccounts --subresource=token" \
+                   "-n zuul-trial create endpoints" "-n zuul-trial create endpointslices.discovery.k8s.io" \
+                   "-n zuul-trial create serviceaccounts --subresource=token" \
                    "-n zuul-trial update resourcequotas" "impersonate users" \
-                   "-n zuul-trial update pods --subresource=ephemeralcontainers"; do
+                   "-n zuul-trial update pods --subresource=ephemeralcontainers" \
+                   "-n zuul-trial get pods --subresource=proxy" "-n zuul-trial get services --subresource=proxy" \
+                   "-n zuul-trial update services --subresource=status" "get nodes --subresource=proxy"; do
             # shellcheck disable=SC2086 # $q is the question's words
             a=$(can $q); echo "can $q: $a"; [ "$a" = no ]
           done
@@ -291,75 +296,144 @@ jobs:
           # What admission refuses: each must fail, with the reason in its message.
           refused() {
             local why=$1; shift
-            if k --as "$u" -n zuul-trial "$@" --dry-run=server > /dev/null 2> "$RUNNER_TEMP/refused.txt"; then
+            if k --as "$u" --as-group devinfra -n zuul-trial "$@" --dry-run=server > /dev/null \
+                 2> "$RUNNER_TEMP/refused.txt"; then
               echo "Admitted, but should be refused ($why): $*" >&2; exit 1
             fi
             grep -q "$why" "$RUNNER_TEMP/refused.txt" || { cat "$RUNNER_TEMP/refused.txt" >&2; exit 1; }
             echo "refused ($why): $(head -c 160 "$RUNNER_TEMP/refused.txt")"
           }
-          # A pod as JSON: $1 is added to its spec, $2 to its container.
+          # A pod as JSON: $1 is added to its spec, $2 to its container, $3 replaces the image.
           pod() {
             printf '{"apiVersion":"v1","kind":"Pod","metadata":{"name":"t"},"spec":{%s' "$1"
-            printf '"containers":[{"name":"t","image":"%s"%s}]}}' "$CURL_IMAGE" "$2"
+            printf '"containers":[{"name":"t","image":"%s"%s}]}}' "${3:-$CURL_IMAGE}" "$2"
           }
           refused 'violates PodSecurity "baseline' apply -f - <<< "$(pod '' ',"securityContext":{"privileged":true}')"
           refused 'violates PodSecurity "baseline' apply -f - \
             <<< "$(pod '"volumes":[{"name":"h","hostPath":{"path":"/"}}],' '')"
           refused 'violates PodSecurity "baseline' apply -f - <<< "$(pod '"hostNetwork":true,' '')"
-          refused 'tenant namespaces allow only the volume types' apply -f - \
+          refused 'violates PodSecurity "baseline' apply -f - \
+            <<< "$(pod '' ',"securityContext":{"capabilities":{"add":["NET_RAW"]}}')"
+          refused 'tenant namespaces allow only these volume types' apply -f - \
             <<< "$(pod '"volumes":[{"name":"n","nfs":{"server":"'"$GATEWAY"'","path":"/"}}],' '')"
+          refused 'tenant namespaces pull images only from registries on the internet' apply -f - \
+            <<< "$(pod '' '' registry-scratch.arc-scratch.svc:5000/x:1)"
+          refused 'tenant namespaces pull images only from registries on the internet' apply -f - \
+            <<< "$(pod '' '' "$GATEWAY:5000/x:1")"
+          refused 'tenant namespaces pull images only from registries on the internet' apply -f - \
+            <<< "$(pod '' '' localhost:5000/x:1)"
           k -n zuul-trial create service clusterip ext --tcp=3128:3128 --dry-run=client -o json \
             | jq '.spec.externalIPs = ["172.31.250.2"]' > "$RUNNER_TEMP/svc-ext.json"
           refused 'tenant namespaces allow no Service with spec.externalIPs' apply -f - < "$RUNNER_TEMP/svc-ext.json"
           refused 'services.nodeports' create service nodeport np --tcp=80:80
           refused 'no-priority-class' apply -f - <<< "$(pod '"priorityClassName":"system-cluster-critical",' '')"
-          # And a plain pod is admitted, with a memory limit from the LimitRange.
-          k --as "$u" -n zuul-trial apply --dry-run=server \
-            -o jsonpath='{.spec.containers[0].resources.limits.memory}{"\n"}' -f - <<< "$(pod '' '')"
+          # A plain pod is admitted, with the LimitRange's memory limit and NET_RAW dropped; a pod
+          # that drops ALL keeps exactly that.
+          got=$(k --as "$u" --as-group devinfra -n zuul-trial apply --dry-run=server -o json -f - <<< "$(pod '' '')" \
+            | jq -c '.spec.containers[0] | [.resources.limits.memory, .securityContext.capabilities.drop]')
+          echo "plain pod: $got"; [ "$got" = '["512Mi",["NET_RAW"]]' ]
+          got=$(k --as "$u" --as-group devinfra -n zuul-trial apply --dry-run=server -o json \
+                  -f - <<< "$(pod '' ',"securityContext":{"capabilities":{"drop":["ALL"]}}')" \
+            | jq -c '.spec.containers[0].securityContext.capabilities.drop')
+          echo "pod dropping ALL: $got"; [ "$got" = '["ALL"]' ]
 
-          # A real certificate, through the forwarder, from a container on another network.
-          openssl ecparam -name prime256v1 -genkey -noout -out "$RUNNER_TEMP/tenant.key"
-          openssl req -new -key "$RUNNER_TEMP/tenant.key" -subj "/CN=$u/O=devinfra" -out "$RUNNER_TEMP/tenant.csr"
-          openssl req -new -key "$RUNNER_TEMP/tenant.key" -subj "/CN=$u/O=system:masters" -out "$RUNNER_TEMP/admin.csr"
-          if scripts/tenant-cert.sh "$u" "$RUNNER_TEMP/admin.csr" --out "$RUNNER_TEMP"; then
-            echo "tenant-cert.sh signed O=system:masters" >&2; exit 1
+          # tenant-cert.sh refuses any other subject, and creates no CertificateSigningRequest for it.
+          key=$RUNNER_TEMP/tenant.key
+          openssl ecparam -name prime256v1 -genkey -noout -out "$key"
+          before=$(k get csr --no-headers 2>/dev/null | wc -l)
+          for subj in "/CN=$u/O=system:masters" "/CN=$u/OU=x/O=devinfra" "/CN=$u/O=devinfra/O=x" \
+                      "/CN=t3c-artifex-prime/O=devinfra" "/CN=$u/CN=$u/O=devinfra"; do
+            openssl req -new -key "$key" -subj "$subj" -out "$RUNNER_TEMP/bad.csr"
+            if scripts/tenant-cert.sh "$u" "$RUNNER_TEMP/bad.csr" --out "$RUNNER_TEMP" 2> "$RUNNER_TEMP/out.txt"; then
+              echo "tenant-cert.sh signed $subj" >&2; exit 1
+            fi
+            grep -q '^Refused' "$RUNNER_TEMP/out.txt" || { cat "$RUNNER_TEMP/out.txt" >&2; exit 1; }
+            echo "$subj: $(grep '^Refused' "$RUNNER_TEMP/out.txt")"
+          done
+          openssl req -new -key "$key" -subj "/CN=$u/O=devinfra" -addext "subjectAltName=DNS:x" \
+            -out "$RUNNER_TEMP/bad.csr"
+          if scripts/tenant-cert.sh "$u" "$RUNNER_TEMP/bad.csr" --out "$RUNNER_TEMP"; then
+            echo "tenant-cert.sh signed a request with a subject alternative name" >&2; exit 1
           fi
+          [ "$(k get csr --no-headers 2>/dev/null | wc -l)" = "$before" ]
+
+          # A real certificate and the kubeconfig the script writes, used by kubectl through the
+          # forwarder from a container on another network. The credential plugin prints the
+          # certificate and key from a file here; on a user's machine they come from a secret store.
+          openssl req -new -key "$key" -subj "/CN=$u/O=devinfra" -out "$RUNNER_TEMP/tenant.csr"
           scripts/tenant-cert.sh "$u" "$RUNNER_TEMP/tenant.csr" --namespace zuul-trial --out "$RUNNER_TEMP"
+          jq -n --rawfile cert "$RUNNER_TEMP/$u.crt" --rawfile key "$key" \
+            '{apiVersion: "client.authentication.k8s.io/v1", kind: "ExecCredential",
+              status: {clientCertificateData: $cert, clientKeyData: $key}}' > "$RUNNER_TEMP/credential.json"
+          printf '#!/bin/sh\ncat /t/credential.json\n' > "$RUNNER_TEMP/tenant-credential"
+          chmod +x "$RUNNER_TEMP/tenant-credential"
           docker network create tenants-test
           API_FORWARD_NETWORK=tenants-test docker compose -f api-forward.yml up -d --wait
+          k3s_image=$(docker inspect --format '{{.Config.Image}}' "$(docker compose ps -q k3s)")
+          tk() {
+            docker run --rm -u "$(id -u)" --network tenants-test -v "$RUNNER_TEMP:/t:ro" --entrypoint kubectl \
+              "$k3s_image" --kubeconfig "/t/$u.kubeconfig" "$@"
+          }
+          tk get pods
+          tk auth whoami
+          for q in "-n arc-runners get pods" "get nodes" "get namespaces"; do
+            # shellcheck disable=SC2086 # $q is the command's words
+            if tk $q 2> "$RUNNER_TEMP/out.txt"; then echo "allowed: $q" >&2; exit 1; fi
+            grep -q Forbidden "$RUNNER_TEMP/out.txt" || { cat "$RUNNER_TEMP/out.txt" >&2; exit 1; }
+            echo "forbidden: $q"
+          done
+          # Without a certificate, nothing at all.
           yq '.clusters[0].cluster."certificate-authority-data"' "$RUNNER_TEMP/$u.kubeconfig" \
             | base64 -d > "$RUNNER_TEMP/ca.crt"
-          api() {
-            docker run --rm -u "$(id -u)" --network tenants-test -v "$RUNNER_TEMP:/t:ro" "$CURL_IMAGE" \
-              -sS -o /dev/null \
-              -w '%{http_code}' -m 10 --cacert /t/ca.crt --cert "/t/$u.crt" --key /t/tenant.key \
-              --connect-to kubernetes:6443:k3s-api:6443 "https://kubernetes:6443$1" || true
-          }
-          c=$(api /api/v1/namespaces/zuul-trial/pods); echo "zuul-trial pods: $c"; [ "$c" = 200 ]
-          c=$(api /api/v1/namespaces/arc-runners/pods); echo "arc-runners pods: $c"; [ "$c" = 403 ]
-          c=$(api /api/v1/nodes); echo "nodes: $c"; [ "$c" = 403 ]
-          # Without a certificate: only health and version.
-          anon() {
-            docker run --rm -u "$(id -u)" --network tenants-test -v "$RUNNER_TEMP:/t:ro" "$CURL_IMAGE" \
-              -sS -o /dev/null \
-              -w '%{http_code}' -m 10 --cacert /t/ca.crt --connect-to kubernetes:6443:k3s-api:6443 \
-              "https://kubernetes:6443$1" || true
-          }
-          c=$(anon /api/v1/namespaces/zuul-trial/pods); echo "zuul-trial pods without a certificate: $c"
-          [ "$c" = 401 ]
+          for p in /version /api/v1/namespaces/zuul-trial/pods; do
+            c=$(docker run --rm -u "$(id -u)" --network tenants-test -v "$RUNNER_TEMP:/t:ro" "$CURL_IMAGE" \
+                  -sS -o /dev/null -w '%{http_code}' -m 10 --cacert /t/ca.crt \
+                  --connect-to kubernetes:6443:k3s-api:6443 "https://kubernetes:6443$p" || true)
+            echo "$p without a certificate: $c"; [ "$c" = 401 ]
+          done
 
-          # A tenant pod's egress: the proxy yes, the host through the gateway no.
+          # The NetworkPolicies, from a tenant pod. Servers: one in the same namespace, one in the
+          # other tenant, one in default (no policies) behind a NodePort, and a port on the host.
           python3 -m http.server 18081 --bind 0.0.0.0 > /dev/null 2>&1 &
-          k -n zuul-trial run egress-test --image="$CURL_IMAGE" --restart=Never --command -- sleep 600
-          k -n zuul-trial wait --for=condition=Ready pod/egress-test --timeout=180s
-          code() { k -n zuul-trial exec egress-test -- curl -sS -o /dev/null -m 10 -w '%{http_code}' "$@" || true; }
-          c=$(code -x "$PROXY" https://github.com/); echo "github.com through the proxy: $c"; [ "$c" = 200 ]
-          c=$(docker run --rm --network ci_runners "$CURL_IMAGE" \
-                -sS -o /dev/null -m 10 -w '%{http_code}' "http://$GATEWAY:18081/" || true)
-          echo "host port via the gateway, from a container on the network: $c"; [ "$c" = 200 ]
-          c=$(code --noproxy '*' "http://$GATEWAY:18081/"); echo "host port via the gateway, from the pod: $c"
-          [ "$c" = 000 ]
-          k -n zuul-trial delete pod egress-test --wait=false
+          serve() { k -n "$1" run "$2" --image="$BUSYBOX_IMAGE" --port=8080 --command -- httpd -f -p 8080; }
+          serve zuul-trial same; serve build-farm other; serve default open
+          k -n default expose pod open --type=NodePort --port=8080
+          k -n zuul-trial run client --image="$CURL_IMAGE" --command -- sleep 600
+          k -n default run control --image="$CURL_IMAGE" --command -- sleep 600
+          for p in zuul-trial/same build-farm/other default/open zuul-trial/client default/control; do
+            k -n "${p%/*}" wait --for=condition=Ready "pod/${p#*/}" --timeout=180s
+          done
+          ip() { k -n "$1" get pod "$2" -o jsonpath='{.status.podIP}'; }
+          nodeport=$(k -n default get service open -o jsonpath='{.spec.ports[0].nodePort}')
+          from() {
+            k -n "$1" exec "$2" -- curl -ksS -o /dev/null -m 5 -w '%{http_code}' --noproxy '*' "$3" 2>/dev/null || true
+          }
+          expect() {
+            local c; c=$(from "$1" "$2" "$3"); echo "$1/$2 -> $3: $c (want $4)"; [ "$c" = "$4" ]
+          }
+          expect zuul-trial client "http://$(ip zuul-trial same):8080/" 404
+          expect zuul-trial client "http://$(ip default open):8080/" 404
+          expect zuul-trial client "http://$(ip build-farm other):8080/" 000
+          expect default control "http://$(ip zuul-trial same):8080/" 000
+          # The controls show each address answers when a policy is not in the way.
+          expect default control "http://172.31.250.10:$nodeport/" 404
+          expect default control "http://10.42.0.1:$nodeport/" 404
+          expect default control "http://$GATEWAY:18081/" 200
+          expect default control "https://172.31.250.10:6443/" 401
+          expect default control "https://172.31.250.11:6443/" 401
+          expect zuul-trial client "http://172.31.250.10:$nodeport/" 000
+          expect zuul-trial client "http://10.42.0.1:$nodeport/" 000
+          expect zuul-trial client "http://$GATEWAY:18081/" 000
+          expect zuul-trial client "https://172.31.250.10:6443/" 000
+          expect zuul-trial client "https://10.43.0.1:443/" 000
+          expect zuul-trial client "https://172.31.250.11:6443/" 000
+          c=$(k -n zuul-trial exec client -- curl -sS -o /dev/null -m 15 -w '%{http_code}' -x "$PROXY" \
+                https://github.com/ || true)
+          echo "github.com through the proxy from the tenant pod: $c"; [ "$c" = 200 ]
+          k -n zuul-trial delete pod same client --wait=false
+          k -n build-farm delete pod other --wait=false
+          k -n default delete pod open control --wait=false
+          k -n default delete service open
           docker compose -p ci-api down
 
       - name: The proxy saw the pulls

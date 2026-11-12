@@ -9,12 +9,13 @@
 # https://k3s-api:6443 on that network, through socat: one TCP port, forwarded byte for byte, so
 # TLS ends at the API server and the forwarder holds no credential. The API server's certificate
 # does not name k3s-api; a client's kubeconfig sets tls-server-name to "kubernetes", which it does.
-# The API server allows no anonymous requests beyond its health and version endpoints.
+# k3s turns anonymous requests off: without a client certificate every path, /version and
+# /healthz included, answers 401.
 #
-# On the stack network the forwarder only ever connects to the node's address and port below. Its
-# own address there is fixed, outside Docker's dynamic picks, so that it can never take the
-# node's or the proxy's address while those containers are stopped. If you change the stack
-# subnet (docker-compose.yml), change both addresses here too.
+# On the stack network the forwarder only ever connects to the node's address and port below, and
+# it routes nothing between the two networks (ip_forward is off). Its own address there is fixed,
+# so that, started while the node or the proxy is stopped, it cannot take their address. If you
+# change the stack subnet (docker-compose.yml), change both addresses here too.
 name: ci-api
 
 services:
@@ -36,6 +37,8 @@ services:
     cpus: 0.25
     mem_limit: 64m
     pids_limit: 64
+    sysctls:
+      net.ipv4.ip_forward: 0
     logging:
       driver: local
       options:

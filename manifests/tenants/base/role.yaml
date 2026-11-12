@@ -12,8 +12,9 @@
 #   resourcequotas, limitranges (read only): the namespace's budget.
 #   endpoints, endpointslices (read only): written by hand, they send a Service's traffic to any
 #     address (CVE-2021-25740); Kubernetes' own "edit" role leaves them out for that reason.
-#   serviceaccounts/token: a token for one of the namespace's ServiceAccounts, which have no
-#     permissions anyway; pods get theirs projected without it.
+#   serviceaccounts/token: not needed, pods get theirs projected. (A token Secret for one of the
+#     namespace's ServiceAccounts can still be made with `create secrets`; they have no
+#     permissions.)
 #   pods/ephemeralcontainers, */status, pods/eviction, ingresses: not needed (no ingress
 #     controller runs: docker-compose.yml disables Traefik).
 # Pod Security (the namespace's labels) and admission.yaml decide what a pod may contain.

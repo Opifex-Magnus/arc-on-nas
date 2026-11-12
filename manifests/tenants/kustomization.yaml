@@ -4,11 +4,16 @@
 # Separate from ../kustomization.yaml: the runners do not need it, and removing it is
 # `kubectl delete -k` of this directory alone.
 #
-# Each tenant is a directory: its namespace, quota and limits, plus base/ (the Role, the
-# RoleBinding, the NetworkPolicies) with its namespace set by kustomize. admission.yaml holds the
-# two checks Pod Security "baseline" does not make, for every namespace labelled as a tenant.
+# Each tenant is a directory: its namespace, quota and limits, plus base/ (the policies, then
+# the Role and RoleBinding) with its namespace set by kustomize. admission.yaml holds what Pod
+# Security "baseline" leaves open, for every namespace labelled as a tenant.
+#
+# Applied in the order listed (sortOptions fifo), so that the admission policies, the quotas and
+# the NetworkPolicies exist before the RoleBinding gives the users anything.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
+sortOptions:
+  order: fifo
 resources:
   - admission.yaml
   - zuul-trial
