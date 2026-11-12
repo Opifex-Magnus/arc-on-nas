@@ -42,55 +42,50 @@ spec:
         apiVersions: [v1]
         operations: [CREATE]
         resources: [pods]
-  variables:
-    - name: lacking
-      expression: >-
-        object.spec.containers.filter(c, !(has(c.securityContext) &&
-        has(c.securityContext.capabilities) && has(c.securityContext.capabilities.drop) &&
-        c.securityContext.capabilities.drop.exists(d, d == 'ALL' || d == 'NET_RAW')))
-    - name: lackingInit
-      expression: >-
-        (has(object.spec.initContainers) ? object.spec.initContainers : []).filter(c,
-        !(has(c.securityContext) && has(c.securityContext.capabilities) &&
-        has(c.securityContext.capabilities.drop) &&
-        c.securityContext.capabilities.drop.exists(d, d == 'ALL' || d == 'NET_RAW')))
   mutations:
-    # Two patches, so neither sends an empty list. capabilities.drop is replaced whole, so each
-    # keeps the container's own drops and adds NET_RAW.
-    - patchType: ApplyConfiguration
-      applyConfiguration:
+    # A JSON patch, one operation per container that lacks the drop, at the first level of
+    # securityContext.capabilities.drop that is missing. (An apply configuration may not change
+    # capabilities.drop: it is an atomic list.)
+    - patchType: JSONPatch
+      jsonPatch:
         expression: >-
-          size(variables.lacking) == 0 ? Object{} : Object{
-            spec: Object.spec{
-              containers: variables.lacking.map(c, Object.spec.containers{
-                name: c.name,
-                securityContext: Object.spec.containers.securityContext{
-                  capabilities: Object.spec.containers.securityContext.capabilities{
-                    drop: (has(c.securityContext) && has(c.securityContext.capabilities) &&
-                      has(c.securityContext.capabilities.drop) ?
-                      c.securityContext.capabilities.drop : []) + ['NET_RAW']
-                  }
-                }
-              })
-            }
-          }
-    - patchType: ApplyConfiguration
-      applyConfiguration:
-        expression: >-
-          size(variables.lackingInit) == 0 ? Object{} : Object{
-            spec: Object.spec{
-              initContainers: variables.lackingInit.map(c, Object.spec.initContainers{
-                name: c.name,
-                securityContext: Object.spec.initContainers.securityContext{
-                  capabilities: Object.spec.initContainers.securityContext.capabilities{
-                    drop: (has(c.securityContext) && has(c.securityContext.capabilities) &&
-                      has(c.securityContext.capabilities.drop) ?
-                      c.securityContext.capabilities.drop : []) + ['NET_RAW']
-                  }
-                }
-              })
-            }
-          }
+          lists.range(size(object.spec.containers)).filter(i,
+          !(has(object.spec.containers[i].securityContext) &&
+          has(object.spec.containers[i].securityContext.capabilities) &&
+          has(object.spec.containers[i].securityContext.capabilities.drop) &&
+          object.spec.containers[i].securityContext.capabilities.drop.exists(d, d == 'ALL' || d == 'NET_RAW'))
+          ).map(i,
+          !has(object.spec.containers[i].securityContext) ?
+            JSONPatch{op: "add", path: "/spec/containers/" + string(i) + "/securityContext",
+              value: Object.spec.containers.securityContext{
+                capabilities: Object.spec.containers.securityContext.capabilities{drop: ["NET_RAW"]}}} :
+          !has(object.spec.containers[i].securityContext.capabilities) ?
+            JSONPatch{op: "add", path: "/spec/containers/" + string(i) + "/securityContext/capabilities",
+              value: Object.spec.containers.securityContext.capabilities{drop: ["NET_RAW"]}} :
+          !has(object.spec.containers[i].securityContext.capabilities.drop) ?
+            JSONPatch{op: "add", path: "/spec/containers/" + string(i) + "/securityContext/capabilities/drop",
+              value: ["NET_RAW"]} :
+            JSONPatch{op: "add", path: "/spec/containers/" + string(i) + "/securityContext/capabilities/drop/-",
+              value: "NET_RAW"}) +
+          (has(object.spec.initContainers) ?
+          lists.range(size(object.spec.initContainers)).filter(i,
+          !(has(object.spec.initContainers[i].securityContext) &&
+          has(object.spec.initContainers[i].securityContext.capabilities) &&
+          has(object.spec.initContainers[i].securityContext.capabilities.drop) &&
+          object.spec.initContainers[i].securityContext.capabilities.drop.exists(d, d == 'ALL' || d == 'NET_RAW'))
+          ).map(i,
+          !has(object.spec.initContainers[i].securityContext) ?
+            JSONPatch{op: "add", path: "/spec/initContainers/" + string(i) + "/securityContext",
+              value: Object.spec.initContainers.securityContext{
+                capabilities: Object.spec.initContainers.securityContext.capabilities{drop: ["NET_RAW"]}}} :
+          !has(object.spec.initContainers[i].securityContext.capabilities) ?
+            JSONPatch{op: "add", path: "/spec/initContainers/" + string(i) + "/securityContext/capabilities",
+              value: Object.spec.initContainers.securityContext.capabilities{drop: ["NET_RAW"]}} :
+          !has(object.spec.initContainers[i].securityContext.capabilities.drop) ?
+            JSONPatch{op: "add", path: "/spec/initContainers/" + string(i) + "/securityContext/capabilities/drop",
+              value: ["NET_RAW"]} :
+            JSONPatch{op: "add", path: "/spec/initContainers/" + string(i) + "/securityContext/capabilities/drop/-",
+              value: "NET_RAW"}) : [])
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingAdmissionPolicyBinding

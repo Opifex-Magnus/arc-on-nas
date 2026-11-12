@@ -337,7 +337,7 @@ jobs:
                   -f - <<< "$(pod '' ',"securityContext":{"capabilities":{"drop":["ALL"]}}')" \
             | jq -c '.spec.containers[0].securityContext.capabilities.drop')
           echo "pod dropping ALL: $got"; [ "$got" = '["ALL"]' ]
-          # Merged by container name, each keeping its own drops: two containers and an init one.
+          # Each container keeps its own drops and gains NET_RAW: an init container and two others.
           cat > "$RUNNER_TEMP/three.json" <<EOF
           {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "t"}, "spec": {
             "initContainers": [{"name": "i", "image": "$CURL_IMAGE"}],
