@@ -1,0 +1,54 @@
+# The executor's budget (README.md, "Sizes"): with zuul's (../namespace/quota.yaml), the
+# budget the trial namespace zuul-trial had. The executor is one pod; a rolling update of its
+# StatefulSet stops it before it starts the new one, so the quota needs no room for two.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: budget
+spec:
+  hard:
+    requests.cpu: 500m
+    limits.cpu: "4"
+    requests.memory: 512Mi
+    limits.memory: 2Gi
+    # The git cache and every build's work directory, on the kubelet's filesystem with the runners'
+    # work folders (arc-on-nas's README, "Tenant namespaces", "Disk").
+    requests.ephemeral-storage: 3Gi
+    limits.ephemeral-storage: 3Gi
+    pods: "3"
+    services: "2"
+    services.nodeports: "0"
+    services.loadbalancers: "0"
+    configmaps: "10"
+    secrets: "10"
+    persistentvolumeclaims: "0"
+---
+# No PriorityClass, as in the tenant namespaces (arc-on-nas's tenants/base/quota-priority.yaml): the
+# executor never preempts a runner.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: no-priority-class
+spec:
+  hard:
+    pods: "0"
+  scopeSelector:
+    matchExpressions:
+      - scopeName: PriorityClass
+        operator: Exists
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: defaults
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: "1"
+        memory: 512Mi
+        ephemeral-storage: 256Mi
+      defaultRequest:
+        cpu: 50m
+        memory: 128Mi
+        ephemeral-storage: 32Mi

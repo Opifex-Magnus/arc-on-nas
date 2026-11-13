@@ -1,0 +1,11 @@
+# The tenants (https://zuul-ci.org/docs/zuul/latest/tenants.html). One tenant, with only Zuul's
+# public job library for now; the forge's repositories and the trusted config project come with the
+# gate's setup.
+- tenant:
+    name: aid
+    source:
+      opendev.org:
+        untrusted-projects:
+          - zuul/zuul-jobs:
+              include:
+                - job

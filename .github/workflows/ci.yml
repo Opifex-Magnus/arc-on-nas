@@ -178,7 +178,8 @@ jobs:
     runs-on: ubuntu-24.04
     # Above the sum of the waits below (about 28 minutes), so a slow day ends in a wait's own error
     # and the diagnostics; a normal run takes about 4 minutes.
-    timeout-minutes: 32
+    # More than the stack alone: the Zuul test bed pulls Zuul's images.
+    timeout-minutes: 50
     env:
       CHART_VERSION: "0.15.0"
       CHARTS: oci://ghcr.io/actions/actions-runner-controller-charts
@@ -884,6 +885,150 @@ jobs:
           server=/opt/arc-on-nas/manifests/tenants/build-farm/server
           k --as "$u" --as-group devinfra -n build-farm delete -k "$server" --wait=false
 
+      - name: Zuul (test bed)
+        # AIDepartment's deploy/zuul, copied into manifests/testbed-zuul by its testbed.sh (TESTBED).
+        run: |
+          set -euo pipefail
+          k() { docker compose exec -T k3s kubectl "$@"; }
+          u=opifex-magnus
+          tk() { k --as "$u" --as-group devinfra -n zuul "$@"; }
+          can() { k auth can-i --as "$u" --as-group devinfra "$@" 2>/dev/null || true; }
+          # The tenant cannot see or change the executor's namespace (deploy/zuul/README.md, "The executor").
+          for q in "-n zuul-executor get pods" "-n zuul-executor create pods" "-n zuul-executor get secrets" \
+                   "-n zuul-executor patch statefulsets.apps" "-n zuul-executor get configmaps"; do
+            # shellcheck disable=SC2086 # $q is the question's words
+            a=$(can $q); echo "can $q: $a"; [ "$a" = no ]
+          done
+          # The state volumes' directories, owned by each pod's user. On a host each is a filesystem
+          # of its own, bind-mounted into the node (deploy/zuul/README.md); here they are directories in
+          # the node's container.
+          docker compose exec -T k3s sh -c 'set -e; d=/var/lib/zuul-state
+            mkdir -p "$d/zookeeper/data" "$d/db/data"
+            chown 1000:1000 "$d/zookeeper/data"; chown 999:999 "$d/db/data"; chmod 700 "$d"/*/data'
+          cat manifests/testbed-zuul/TESTBED
+          # The namespace, its volumes and claims, by the admin.
+          k apply -k /opt/arc-on-nas/manifests/testbed-zuul/namespace
+          for c in zookeeper db; do k -n zuul wait --for=jsonpath='{.status.phase}'=Bound "pvc/$c" --timeout=60s; done
+          # The Secrets, made by the admin (deploy/zuul/README.md, "Secrets"): the CA, the keystore
+          # password, both namespaces' key pairs and the database's passwords.
+          s=manifests/testbed-zuul/secrets.sh
+          "$s" ca "$RUNNER_TEMP/zuul-ca"
+          (umask 077 && openssl rand -hex 32 > "$RUNNER_TEMP/zuul-keystore")
+          ca=(--ca-cert "$RUNNER_TEMP/zuul-ca/ca.crt" --ca-key "$RUNNER_TEMP/zuul-ca/ca.key"
+              --keystore-password "$RUNNER_TEMP/zuul-keystore")
+          "$s" zuul "${ca[@]}" | k -n zuul apply -f -
+          "$s" db | k -n zuul apply -f -
+          k apply -f /opt/arc-on-nas/manifests/testbed-zuul/executor/namespace.yaml
+          "$s" executor "${ca[@]}" | k -n zuul-executor apply -f -
+          # The services, applied by the tenant, as on a host; the executor by the admin.
+          tk apply -k /opt/arc-on-nas/manifests/testbed-zuul/server
+          k apply -k /opt/arc-on-nas/manifests/testbed-zuul/executor
+          # ready: every Zuul pod is ready (the images are large: the first pull takes minutes).
+          ready() {
+            k -n zuul rollout status statefulset/zookeeper --timeout=600s
+            k -n zuul rollout status statefulset/db --timeout=600s
+            for d in scheduler web launcher; do k -n zuul rollout status "deployment/$d" --timeout=600s; done
+            k -n zuul-executor rollout status statefulset/executor --timeout=600s
+          }
+          ready
+          k -n zuul get pods -o wide
+          k -n zuul-executor get pods -o wide
+          # A client in zuul, and one in another namespace.
+          for ns in zuul default; do
+            k -n "$ns" run zuul-client --image="$CURL_IMAGE" --command -- sleep 1200
+            k -n "$ns" wait --for=condition=Ready pod/zuul-client --timeout=180s
+          done
+          api() { k -n zuul exec zuul-client -- curl -sSf -m 10 --noproxy '*' "http://web:9000/api/$1"; }
+          # retry <seconds> <command...>: until it succeeds, every 5 seconds.
+          retry() {
+            local end=$(( $(date +%s) + $1 )); shift
+            until "$@"; do [ "$(date +%s)" -lt "$end" ] || return 1; sleep 5; done
+          }
+          # loaded: every service has registered and runs, and the tenant has loaded its projects.
+          # zuul/zuul-jobs comes from opendev.org through the proxy, read by the executor's merger.
+          loaded() {
+            local got
+            got=$(api components | jq -c '[.scheduler, .web, .launcher, .executor]
+                  | map(length > 0 and all(.[]; .state == "running"))') || return 1
+            echo "scheduler, web, launcher and executor running: $got"
+            [ "$got" = '[true,true,true,true]' ] || return 1
+            got=$(api tenant/aid/jobs | jq length) || return 1
+            echo "the tenant's jobs: $got"; [ "$got" -gt 0 ]
+          }
+          retry 300 loaded
+          api info | jq -c .
+          api components | jq -c '.executor[] | {hostname, state, version}'
+          echo "config errors: $(api tenant/aid/config-errors | jq length)"
+          key=$(api tenant/aid/key/zuul/zuul-jobs.pub)
+          echo "$key" | head -n 2
+          grep -q 'BEGIN PUBLIC KEY' <<< "$key"
+
+          # The network (deploy/zuul/README.md, "The network"). ZooKeeper: reached from zuul, not from
+          # another namespace. connects <ns> <host:port>: a TCP connection opens within 5 seconds.
+          # curl's telnet waits for the other end, so it ends at -m with an error either way; what
+          # tells is whether it says it connected ("Connected to" before curl 8.13, "Established
+          # connection to" since).
+          connects() {
+            local out
+            out=$(k -n "$1" exec zuul-client -- curl -v -o /dev/null -m 5 --noproxy '*' "telnet://$2" 2>&1 || true)
+            grep -qE '^\* (Connected to|Established connection to) ' <<< "$out"
+          }
+          expect() {
+            if connects "$1" "$2"; then got=connects; else got=refused; fi
+            echo "$1 -> $2: $got (want $3)"; [ "$got" = "$3" ]
+          }
+          zk=zookeeper.zuul.svc.cluster.local:2281
+          expect zuul "$zk" connects
+          expect default "$zk" refused
+          # The executor's finger port: from zuul-web only, not from another pod in zuul.
+          finger=$(api components | jq -r '.executor[0].hostname'):7900
+          expect zuul "$finger" refused
+          web=$(k -n zuul get pod -l app.kubernetes.io/name=web -o jsonpath='{.items[0].metadata.name}')
+          k -n zuul exec "$web" -- python3 -c "import socket, sys
+          socket.create_connection(('${finger%:*}', 7900), 5).close(); print('zuul-web -> $finger: connects')"
+          # ZooKeeper takes no client without a certificate from Zuul's CA.
+          k -n zuul exec "$web" -- python3 -c "import socket, ssl
+          c = ssl.create_default_context(cafile='/etc/zuul-tls/ca.crt')
+          try:
+              s = c.wrap_socket(socket.create_connection(('zookeeper', 2281), 5), server_hostname='zookeeper')
+              s.sendall(bytes(48))
+              if s.recv(1):
+                  raise SystemExit('ZooKeeper answered a client without a certificate')
+              print('ZooKeeper without a client certificate: closed')
+          except (ssl.SSLError, ConnectionResetError) as e:
+              print('ZooKeeper without a client certificate:', e)"
+          # The privileged executor runs in zuul-executor and nowhere else.
+          priv=$(k -n zuul-executor get pod executor-0 -o jsonpath='{.spec.containers[0].securityContext.privileged}')
+          echo "executor-0 privileged: $priv"; [ "$priv" = true ]
+
+          # What persists (deploy/zuul/README.md, "What persists"): the project key in ZooKeeper and a
+          # row in the database, through a restart of every Zuul pod.
+          marker="arc-on-nas smoke test $(date -u +%FT%TZ)"
+          # The root password from the pod's own environment, expanded there.
+          # shellcheck disable=SC2016
+          sql() { k -n zuul exec db-0 -- sh -c 'mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" -N -e "$1"' sh "$1"; }
+          sql "CREATE DATABASE persist_check; CREATE TABLE persist_check.t (v VARCHAR(80));
+               INSERT INTO persist_check.t VALUES ('$marker')"
+          echo "Zuul's tables: $(sql 'SHOW TABLES FROM zuul' | paste -sd ' ' -)"
+          docker compose exec -T k3s sh -c 'd=/var/lib/zuul-state
+            ls -ln "$d/zookeeper/data/version-2"; du -sh "$d"/*/data'
+          k -n zuul delete pod zookeeper-0 db-0
+          k -n zuul rollout restart deployment/scheduler deployment/web deployment/launcher
+          k -n zuul-executor delete pod executor-0
+          for p in zuul/zookeeper-0 zuul/db-0 zuul-executor/executor-0; do
+            for _ in $(seq 1 30); do k -n "${p%/*}" get pod "${p#*/}" > /dev/null 2>&1 && break; sleep 2; done
+            k -n "${p%/*}" wait --for=condition=Ready "pod/${p#*/}" --timeout=300s
+          done
+          for d in scheduler web launcher; do k -n zuul rollout status "deployment/$d" --timeout=300s; done
+          retry 300 loaded
+          after=$(api tenant/aid/key/zuul/zuul-jobs.pub)
+          [ "$after" = "$key" ] || { echo "the project key changed with the restart" >&2; exit 1; }
+          echo "after a restart, the same project key"
+          got=$(sql 'SELECT v FROM persist_check.t')
+          echo "after a restart, the database's row: $got"; [ "$got" = "$marker" ]
+          sql 'DROP DATABASE persist_check'
+          for ns in zuul default; do k -n "$ns" delete pod zuul-client --wait=false; done
+
       - name: The proxy saw the pulls
         run: |
           docker compose exec -T -u proxy proxy \
@@ -917,6 +1062,12 @@ jobs:
           docker compose exec -T k3s kubectl get pods -A -o wide || true
           docker compose exec -T k3s kubectl get events -A --sort-by=.lastTimestamp | tail -n 60 || true
           docker compose exec -T k3s kubectl -n arc-systems describe pods || true
+          for ns in zuul zuul-executor; do
+            docker compose exec -T k3s kubectl -n "$ns" describe pods || true
+            for p in $(docker compose exec -T k3s kubectl -n "$ns" get pods -o name 2>/dev/null); do
+              docker compose exec -T k3s kubectl -n "$ns" logs --tail 80 --all-containers "$p" || true
+            done
+          done
           docker compose exec -T -u proxy proxy tail -n 60 /var/log/squid/access.log || true
 
       - name: Tear down

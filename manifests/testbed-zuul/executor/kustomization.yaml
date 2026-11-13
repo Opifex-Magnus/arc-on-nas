@@ -1,0 +1,25 @@
+# Zuul's executor in zuul-executor, the admin's namespace (README.md, "The executor"). The admin
+# applies it, after zuul (../namespace/) and its Secrets (../secrets.sh), from a checkout of this
+# repository (deploy/thunderbox/README.md, "Zuul"):
+#   kubectl kustomize deploy/zuul/executor | ssh thunderbox 'sudo docker exec -i ci-k3s-1 kubectl apply -f -'
+# It takes the same configuration and Zuul version as the tenant's services in zuul.
+#
+# Applied in the order listed (sortOptions fifo): the quota and the NetworkPolicies exist before
+# the pod.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: zuul-executor
+sortOptions:
+  order: fifo
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: zuul
+    includeSelectors: false
+resources:
+  - namespace.yaml
+  - quota.yaml
+  - networkpolicy.yaml
+  - ../server/config
+  - executor.yaml
+components:
+  - ../server/version

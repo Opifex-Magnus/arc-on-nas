@@ -1,0 +1,94 @@
+# The executor: runs the builds the scheduler puts in ZooKeeper, each playbook in a bubblewrap
+# sandbox, and does the merges (zuul.conf, merge_jobs). One (README.md, "How many of each").
+#
+# Privileged: bubblewrap needs it (namespace.yaml). It runs as root, as Zuul's own quick start runs
+# it. Its git cache and the builds' work directories are in an emptyDir, refetched after a restart.
+#
+# A StatefulSet, for a name that resolves: the executor registers its host name in ZooKeeper
+# (ZUUL_EXECUTOR_HOSTNAME, below), and zuul-web connects to it there for a build's live log.
+# On SIGTERM it takes no new builds and lets the running ones finish (zuul.conf, sigterm_method),
+# for up to the grace period below; a build still running then fails, and Zuul runs it again.
+#
+# Memory: the trial measured 350 MiB idle and 510 MiB with two light builds; each running build adds
+# its Ansible processes. Zuul's own memory guard cannot see this limit (it reads cgroup v1 only), so
+# the limit is what bounds it; the number of build nodes bounds how many builds run at once.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: executor
+  labels:
+    app.kubernetes.io/name: executor
+spec:
+  replicas: 1
+  serviceName: executor
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: executor
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: executor
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 1800
+      containers:
+        - name: executor
+          # The tag and digest are set for every Zuul service at once, in
+          # ../server/version/.
+          image: quay.io/zuul-ci/zuul-executor
+          env:
+            # The internet only through the proxy; nothing in the cluster through it.
+            - {name: HTTPS_PROXY, value: "http://172.31.250.2:3128"}
+            - {name: https_proxy, value: "http://172.31.250.2:3128"}
+            - {name: HTTP_PROXY, value: "http://172.31.250.2:3128"}
+            - {name: http_proxy, value: "http://172.31.250.2:3128"}
+            - {name: NO_PROXY, value: "localhost,127.0.0.1,.svc,.cluster.local,10.42.0.0/16,10.43.0.0/16"}
+            - {name: no_proxy, value: "localhost,127.0.0.1,.svc,.cluster.local,10.42.0.0/16,10.43.0.0/16"}
+            - name: ZUUL_KEYSTORE_PASSWORD
+              valueFrom: {secretKeyRef: {name: zuul-keystore, key: password}}
+            - name: POD_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - {name: ZUUL_EXECUTOR_HOSTNAME, value: "$(POD_NAME).executor.zuul-executor.svc.cluster.local"}
+          ports:
+            - {name: finger, containerPort: 7900}
+            - {name: metrics, containerPort: 9091}
+          readinessProbe:
+            httpGet: {path: /health/ready, port: metrics}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /health/live, port: metrics}
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            failureThreshold: 6
+          securityContext:
+            privileged: true
+          resources:
+            requests: {cpu: 100m, memory: 512Mi, ephemeral-storage: 512Mi}
+            limits: {cpu: "4", memory: 2Gi, ephemeral-storage: 3Gi}
+          volumeMounts:
+            - {name: config, mountPath: /etc/zuul, readOnly: true}
+            - {name: tls, mountPath: /etc/zuul-tls, readOnly: true}
+            - {name: state, mountPath: /var/lib/zuul}
+      volumes:
+        - name: config
+          configMap: {name: zuul-config}
+        # ZooKeeper's client certificate, the executor's own (../secrets.sh).
+        - name: tls
+          secret: {secretName: zuul-zookeeper-client}
+        - name: state
+          emptyDir: {}
+---
+# Headless: gives the pod the name it registers (above).
+apiVersion: v1
+kind: Service
+metadata:
+  name: executor
+  labels:
+    app.kubernetes.io/name: executor
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: executor
+  ports:
+    - {name: finger, port: 7900, targetPort: finger}

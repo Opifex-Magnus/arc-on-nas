@@ -1,0 +1,83 @@
+# The scheduler: reads the tenants' configuration, runs the pipelines and puts their builds in
+# ZooKeeper for the executor. It keeps no state of its own: the queues and the layout are in
+# ZooKeeper, the history in the database. One (README.md, "How many of each"); Zuul can run more for
+# availability, which one host does not gain.
+#
+# Measured at about 230 MiB with the trial's small tenant; the limit is for a tenant with this
+# forge's repositories and their branches.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scheduler
+  labels:
+    app.kubernetes.io/name: scheduler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: scheduler
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: scheduler
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      # The image's user zuul. emptyDir volumes take the group.
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        runAsNonRoot: true
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: scheduler
+          # The tag and digest are set for every Zuul service at once, in version/.
+          image: quay.io/zuul-ci/zuul-scheduler
+          env:
+            # The internet only through the proxy; nothing in the cluster through it.
+            - {name: HTTPS_PROXY, value: "http://172.31.250.2:3128"}
+            - {name: https_proxy, value: "http://172.31.250.2:3128"}
+            - {name: HTTP_PROXY, value: "http://172.31.250.2:3128"}
+            - {name: http_proxy, value: "http://172.31.250.2:3128"}
+            - {name: NO_PROXY, value: "localhost,127.0.0.1,.svc,.cluster.local,10.42.0.0/16,10.43.0.0/16"}
+            - {name: no_proxy, value: "localhost,127.0.0.1,.svc,.cluster.local,10.42.0.0/16,10.43.0.0/16"}
+            - name: ZUUL_KEYSTORE_PASSWORD
+              valueFrom: {secretKeyRef: {name: zuul-keystore, key: password}}
+            - name: ZUUL_DB_PASSWORD
+              valueFrom: {secretKeyRef: {name: zuul-db, key: password}}
+          ports:
+            - {name: metrics, containerPort: 9091}
+          # 200 once the service is running (or paused), 503 while it starts and loads.
+          readinessProbe:
+            httpGet: {path: /health/ready, port: metrics}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /health/live, port: metrics}
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            failureThreshold: 6
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 50m, memory: 256Mi, ephemeral-storage: 32Mi}
+            limits: {cpu: "1", memory: 1Gi, ephemeral-storage: 128Mi}
+          volumeMounts:
+            - {name: config, mountPath: /etc/zuul, readOnly: true}
+            - {name: tls, mountPath: /etc/zuul-tls, readOnly: true}
+            - {name: state, mountPath: /var/lib/zuul}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: config
+          configMap: {name: zuul-config}
+        # ZooKeeper's client certificate (../secrets.sh).
+        - name: tls
+          secret: {secretName: zuul-zookeeper-client}
+        # The command socket and scratch; nothing that must outlive the pod.
+        - name: state
+          emptyDir: {sizeLimit: 64Mi}
+        - name: tmp
+          emptyDir: {sizeLimit: 64Mi}

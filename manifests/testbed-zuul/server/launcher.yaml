@@ -1,0 +1,76 @@
+# zuul-launcher: makes the build nodes that jobs run on, from the providers in the tenants'
+# configuration. With none configured yet it waits. One.
+#
+# Measured at about 200 MiB.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: launcher
+  labels:
+    app.kubernetes.io/name: launcher
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: launcher
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: launcher
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      # The image's user zuul. emptyDir volumes take the group.
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        runAsNonRoot: true
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: launcher
+          # The tag and digest are set for every Zuul service at once, in version/.
+          image: quay.io/zuul-ci/zuul-launcher
+          env:
+            # The internet only through the proxy; nothing in the cluster through it.
+            - {name: HTTPS_PROXY, value: "http://172.31.250.2:3128"}
+            - {name: https_proxy, value: "http://172.31.250.2:3128"}
+            - {name: HTTP_PROXY, value: "http://172.31.250.2:3128"}
+            - {name: http_proxy, value: "http://172.31.250.2:3128"}
+            - {name: NO_PROXY, value: "localhost,127.0.0.1,.svc,.cluster.local,10.42.0.0/16,10.43.0.0/16"}
+            - {name: no_proxy, value: "localhost,127.0.0.1,.svc,.cluster.local,10.42.0.0/16,10.43.0.0/16"}
+          ports:
+            - {name: metrics, containerPort: 9091}
+          # 200 once the service is running (or paused), 503 while it starts and loads.
+          readinessProbe:
+            httpGet: {path: /health/ready, port: metrics}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /health/live, port: metrics}
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            failureThreshold: 6
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 20m, memory: 224Mi, ephemeral-storage: 32Mi}
+            limits: {cpu: "500m", memory: 512Mi, ephemeral-storage: 128Mi}
+          volumeMounts:
+            - {name: config, mountPath: /etc/zuul, readOnly: true}
+            - {name: tls, mountPath: /etc/zuul-tls, readOnly: true}
+            - {name: state, mountPath: /var/lib/zuul}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: config
+          configMap: {name: zuul-config}
+        # ZooKeeper's client certificate (../secrets.sh).
+        - name: tls
+          secret: {secretName: zuul-zookeeper-client}
+        # The command socket and scratch; nothing that must outlive the pod.
+        - name: state
+          emptyDir: {sizeLimit: 64Mi}
+        - name: tmp
+          emptyDir: {sizeLimit: 64Mi}

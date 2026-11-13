@@ -1,0 +1,95 @@
+# The database: Zuul's build and buildset history, in MariaDB, on the claim `db`
+# (../namespace/state-claims.yaml), a host directory of its own (README.md, "What persists").
+#
+# One pod, never two: a StatefulSet of one replica deletes the old pod and waits until it is gone
+# before it starts the new one. InnoDB writes each commit to its log before it answers, so a pod
+# killed without warning loses nothing committed; the next start recovers from the log.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: db
+  labels:
+    app.kubernetes.io/name: db
+spec:
+  replicas: 1
+  serviceName: db
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: db
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: db
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      # The image's user mysql, and the host directory's owner (../namespace/state-volumes.yaml).
+      securityContext:
+        runAsUser: 999
+        runAsGroup: 999
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      # Time for InnoDB's clean shutdown.
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: mariadb
+          # yamllint disable-line rule:line-length
+          image: mariadb:10.11.19@sha256:7d829180b5b2a9ba74f6242876ab401a0d7dd338a807e522ef92bc9698760f20
+          env:
+            # The image makes the database and its user on the first start, into an empty
+            # directory, and upgrades the system tables after a new MariaDB version.
+            - {name: MARIADB_DATABASE, value: zuul}
+            - {name: MARIADB_USER, value: zuul}
+            - name: MARIADB_PASSWORD
+              valueFrom: {secretKeyRef: {name: zuul-db, key: password}}
+            - name: MARIADB_ROOT_PASSWORD
+              valueFrom: {secretKeyRef: {name: zuul-db, key: root-password}}
+            - {name: MARIADB_AUTO_UPGRADE, value: "1"}
+            - {name: MARIADB_INITDB_SKIP_TZINFO, value: "1"}
+          ports:
+            - {name: mysql, containerPort: 3306}
+          # Open once the server takes connections on its port: not during the first start's setup,
+          # which runs a server without networking. A TCP probe, since a client without credentials
+          # would log a refusal every time.
+          readinessProbe:
+            tcpSocket: {port: mysql}
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: {port: mysql}
+            initialDelaySeconds: 120
+            periodSeconds: 20
+            failureThreshold: 6
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          # Measured at about 85 MiB with the 64 MiB buffer pool (zuul.cnf).
+          resources:
+            requests: {cpu: 20m, memory: 128Mi, ephemeral-storage: 32Mi}
+            limits: {cpu: "1", memory: 512Mi, ephemeral-storage: 128Mi}
+          volumeMounts:
+            - {name: config, mountPath: /etc/mysql/conf.d, readOnly: true}
+            - {name: data, mountPath: /var/lib/mysql}
+            - {name: run, mountPath: /run/mysqld}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: config
+          configMap: {name: db-config}
+        - name: data
+          persistentVolumeClaim: {claimName: db}
+        - name: run
+          emptyDir: {sizeLimit: 16Mi}
+        - name: tmp
+          emptyDir: {sizeLimit: 64Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: db
+  labels:
+    app.kubernetes.io/name: db
+spec:
+  selector:
+    app.kubernetes.io/name: db
+  ports:
+    - {name: mysql, port: 3306, targetPort: mysql}

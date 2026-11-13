@@ -1,0 +1,20 @@
+# The Zuul version, for every Zuul service: the tenant's (../kustomization.yaml) and the executor
+# (../../executor/kustomization.yaml). One release, each image by its tag and digest.
+# Upgrading is a pull request that changes these lines (../../README.md, "Upgrading Zuul");
+# ../../check.sh checks that every image has the same tag, and ../../images.sh that each digest
+# is the tag's.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+images:
+  - name: quay.io/zuul-ci/zuul-scheduler
+    newTag: 14.2.0
+    digest: sha256:fa08909713302c1187195dfddafbe92bb0b92c5e0adcd07fc44b3c333bc22797
+  - name: quay.io/zuul-ci/zuul-web
+    newTag: 14.2.0
+    digest: sha256:4a84aead0c7a2cc2ade481586ed6196a4282e676fb84dddd596eadf007fba431
+  - name: quay.io/zuul-ci/zuul-launcher
+    newTag: 14.2.0
+    digest: sha256:d64df2f7fad9798954c917206890e08d5f418f0fd8de5a4c5463521387e2021a
+  - name: quay.io/zuul-ci/zuul-executor
+    newTag: 14.2.0
+    digest: sha256:a64706b8b98a39e2b04d8f2ac360f12f8562b76fe708f8ab12b79f6da92def7f

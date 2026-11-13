@@ -1,0 +1,63 @@
+# Zuul's state: ZooKeeper's data and the database (README.md), each on a host directory of its own,
+# a filesystem with a quota and snapshots. Cluster-scoped, so the admin applies them, with the rest
+# of this directory; the claims they are reserved for are in state-claims.yaml.
+#
+# What has to persist is all here: ZooKeeper holds Zuul's project keys (encrypted with the keystore
+# password, the Secret zuul-keystore), the pipelines' queues and the cached configuration; the
+# database holds the build and buildset history. Nothing else of Zuul's outlives its pod.
+#
+# Static PersistentVolumes, as for the build farm's cache (deploy/build-farm/): Pod Security's
+# baseline level and arc-on-nas's tenants/admission.yaml forbid hostPath in a tenant's pod, but
+# allow it to mount a claim. The paths are the k3s container's. The host's directories are
+# bind-mounted there by lines in ThunderBox's docker-compose.override.yml
+# (deploy/thunderbox/README.md, "Zuul"). The directories below them must exist and belong to each
+# pod's user before a pod mounts them:
+#   sudo install -d -o 1000 -g 1000 -m 700 /path/to/zuul-zookeeper/data
+#   sudo install -d -o 999 -g 999 -m 700 /path/to/zuul-db/data
+#
+# Each is bound to the one claim named in its claimRef: an unclaimed volume binds to any claim that
+# fits, in any namespace, and so to another tenant's.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: zuul-zookeeper
+  labels:
+    app.kubernetes.io/part-of: zuul
+spec:
+  capacity:
+    # The host filesystem's quota. Informational: Kubernetes does not limit a hostPath volume's
+    # size.
+    storage: 4Gi
+  accessModes:
+    - ReadWriteOnce
+  # Deleting the claim keeps the volume and the data; it then binds to nothing until the admin
+  # removes claimRef.uid or recreates it.
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  claimRef:
+    namespace: zuul
+    name: zookeeper
+  hostPath:
+    path: /var/lib/zuul-state/zookeeper/data
+    # Fail rather than create it root-owned, which the pod could not write.
+    type: Directory
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: zuul-db
+  labels:
+    app.kubernetes.io/part-of: zuul
+spec:
+  capacity:
+    storage: 16Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  claimRef:
+    namespace: zuul
+    name: db
+  hostPath:
+    path: /var/lib/zuul-state/db/data
+    type: Directory

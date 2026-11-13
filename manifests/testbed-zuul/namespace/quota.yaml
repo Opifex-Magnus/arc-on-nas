@@ -1,0 +1,77 @@
+# The namespace's budget (README.md, "Sizes", and arc-on-nas's README, "Tenant namespaces", for
+# the arithmetic). Requests are what the scheduler admits against the node's allocatable, so they
+# are kept small enough to fit beside the runners at their peak; limits are what a pod may use when
+# memory is free, and the k3s container's own cap bounds them all. Every container gets a memory and
+# an ephemeral-storage limit from the LimitRange below when it names none.
+#
+# With the executor's namespace (../executor/quota.yaml), Zuul has the budget the trial
+# namespace zuul-trial had, which this one replaces: 2 GiB of memory requests in all (1.5 here,
+# 0.5 there) and 6 GiB of limits (7 before), and 4 GiB of ephemeral storage (1 here, 3 there).
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: budget
+spec:
+  hard:
+    requests.cpu: "1"
+    # CPU limits only throttle; the k3s container's CPU cap and weight are what protect the host.
+    limits.cpu: "8"
+    # server/ requests 1056Mi and is limited to 3 GiB; the rest is for a rolling update, which
+    # starts a pod's replacement (the scheduler's, 256Mi and 1 GiB, is the largest) before the old
+    # one goes.
+    requests.memory: 1536Mi
+    limits.memory: 4Gi
+    # Disk on the node: emptyDir volumes, the containers' writable layers and their logs, which the
+    # kubelet adds up per pod and evicts the pod for when they pass its containers' limits
+    # (arc-on-nas's README, "Tenant namespaces", "Disk"). The runners' work folders share the
+    # filesystem. Zuul's state is not here but on its own volumes (state-volumes.yaml); the
+    # executor's git cache and job directories are in zuul-executor.
+    requests.ephemeral-storage: 1Gi
+    limits.ephemeral-storage: 1Gi
+    pods: "20"
+    services: "10"
+    # A NodePort answers on every address of the node, outside the namespace's NetworkPolicies;
+    # there is no load balancer.
+    services.nodeports: "0"
+    services.loadbalancers: "0"
+    configmaps: "50"
+    # Every object is a row in k3s's datastore, which the runners need too: a bound on each kind.
+    count/deployments.apps: "20"
+    # Each Deployment keeps up to 10 old ReplicaSets by default.
+    count/replicasets.apps: "250"
+    count/statefulsets.apps: "10"
+    count/daemonsets.apps: "5"
+    count/jobs.batch: "50"
+    count/cronjobs.batch: "10"
+    count/horizontalpodautoscalers.autoscaling: "10"
+    count/poddisruptionbudgets.policy: "10"
+    count/leases.coordination.k8s.io: "20"
+    count/serviceaccounts: "20"
+    secrets: "50"
+    persistentvolumeclaims: "5"
+    # Every claim's requested size together, whatever binds it: the two state volumes
+    # (state-volumes.yaml, 20 GiB) and room for a third.
+    requests.storage: 30Gi
+    # local-path, k3s's default StorageClass, makes a directory on the node for each claim and
+    # does not enforce its size. Zuul's state belongs on its own volumes, not there.
+    local-path.storageclass.storage.k8s.io/requests.storage: "0"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: defaults
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: "1"
+        memory: 512Mi
+        ephemeral-storage: 256Mi
+      defaultRequest:
+        cpu: 50m
+        memory: 128Mi
+        ephemeral-storage: 32Mi
+      max:
+        cpu: "2"
+        memory: 1536Mi
+        ephemeral-storage: 512Mi

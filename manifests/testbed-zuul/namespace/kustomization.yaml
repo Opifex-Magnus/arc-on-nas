@@ -1,0 +1,27 @@
+# The tenant namespace zuul (README.md): the namespace, its quota, the volumes for Zuul's state and
+# their claims, who may reach ZooKeeper from outside the namespace (networkpolicy.yaml), and what
+# every tenant namespace gets: arc-on-nas's generic tenant base (its Role and RoleBinding for the
+# tenant users, its NetworkPolicies and the no-PriorityClass quota), at a pinned commit. The admin
+# applies it, from a checkout of this repository (deploy/thunderbox/README.md, "Zuul"):
+#   kubectl kustomize deploy/zuul/namespace | ssh thunderbox 'sudo docker exec -i ci-k3s-1 kubectl apply -f -'
+# kustomize fetches the base from GitHub with git. arc-on-nas's admission policies
+# (manifests/tenants/admission.yaml), which every namespace labelled arc-on-nas/tenant gets, are
+# applied with arc-on-nas's own tenants.
+#
+# The services, ../server/, are the tenant's to apply; the executor, ../executor/, the admin's.
+#
+# Applied in the order listed (sortOptions fifo): the quota and the NetworkPolicies exist before
+# the RoleBinding gives the tenant users anything.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: zuul
+sortOptions:
+  order: fifo
+resources:
+  - namespace.yaml
+  - quota.yaml
+  - state-volumes.yaml
+  - state-claims.yaml
+  - networkpolicy.yaml
+  # arc-on-nas at df6de28 (2026-11-13). ../check.sh compares the executor's egress policy with it.
+  - ../../tenants/base

@@ -1,0 +1,26 @@
+# Who reaches ZooKeeper (server/zookeeper.yaml) from outside the namespace, on top of the
+# namespace's own pods (arc-on-nas's tenants/base/networkpolicy.yaml): its TLS client port, 2281,
+# for the executor in zuul-executor (../executor/), and nothing else. The executor takes its builds
+# from ZooKeeper and reports there; it reaches no other Zuul service.
+#
+# The admin applies it with the namespace (kustomization.yaml); a tenant can read it, not change it.
+# It names pods by their label, which the tenant sets: the tenant decides which of its pods is
+# ZooKeeper. ZooKeeper takes only clients with a certificate from Zuul's CA (../secrets.sh).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: zookeeper-executor
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: zookeeper
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: zuul-executor
+      ports:
+        - protocol: TCP
+          port: 2281

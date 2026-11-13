@@ -1,0 +1,32 @@
+# The claims on state-volumes.yaml, for ZooKeeper's and the database's pods (server/). Namespaced,
+# so the tenant may apply them too (arc-on-nas's tenants/base/role.yaml). They count against the
+# namespace's requests.storage (quota.yaml).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: zookeeper
+  labels:
+    app.kubernetes.io/part-of: zuul
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ""
+  volumeName: zuul-zookeeper
+  resources:
+    requests:
+      storage: 4Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: db
+  labels:
+    app.kubernetes.io/part-of: zuul
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ""
+  volumeName: zuul-db
+  resources:
+    requests:
+      storage: 16Gi

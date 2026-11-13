@@ -1,0 +1,11 @@
+# Zuul's configuration, as one ConfigMap whose name carries a hash of its contents: a changed file
+# makes a new ConfigMap, and every pod that mounts it is replaced. Shared by ../kustomization.yaml
+# (the tenant's services) and ../../executor/kustomization.yaml (the executor), which set
+# its namespace.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+configMapGenerator:
+  - name: zuul-config
+    files:
+      - zuul.conf
+      - main.yaml

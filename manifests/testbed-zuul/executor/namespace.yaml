@@ -1,0 +1,19 @@
+# Zuul's executor, privileged, in a namespace of the admin's own (README.md, "The executor"). The
+# executor runs each job's Ansible in a bubblewrap sandbox, which needs a fresh /proc and a writable
+# /proc/sys: Pod Security's baseline level refuses that, and Zuul has no way to run without
+# bubblewrap. So this namespace allows privileged pods, and is not a tenant namespace: no tenant
+# user may do anything in it (it has no RoleBinding), and arc-on-nas's tenant admission policies do
+# not apply. Only the admin applies this directory, and only it puts pods here.
+#
+# A privileged pod is root on the node, and the node is root on the host (arc-on-nas's README,
+# "Security posture"): what keeps a job from that is bubblewrap, Zuul's split of trusted and
+# untrusted projects, and who may change this namespace.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: zuul-executor
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    # What a pod here does beyond baseline is recorded in the API server's audit log, if one is
+    # kept.
+    pod-security.kubernetes.io/audit: baseline

@@ -1,0 +1,89 @@
+# ZooKeeper: Zuul's coordination and most of its state, on the claim `zookeeper`
+# (../namespace/state-claims.yaml), a host directory of its own. One server (README.md,
+# "ZooKeeper"): a single host gains nothing from three on the same disk, and Zuul stops while it is
+# down either way.
+#
+# One pod, never two: a StatefulSet of one replica deletes the old pod and waits until it is gone
+# before it starts the new one. ZooKeeper writes every change to its transaction log before it
+# answers, so a pod killed without warning loses nothing that a client was told is stored.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: zookeeper
+  labels:
+    app.kubernetes.io/name: zookeeper
+spec:
+  replicas: 1
+  serviceName: zookeeper
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: zookeeper
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: zookeeper
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      # The image's user, and the host directory's owner (../namespace/state-volumes.yaml). A
+      # hostPath volume ignores fsGroup.
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: zookeeper
+          # yamllint disable-line rule:line-length
+          image: zookeeper:3.9.7@sha256:7654645af057c76db8facc77c5d6fc0749f0f566bdd5c41efe6e3b824d1248c0
+          env:
+            # The JVM's heap, in MiB, below the limit (measured at about 135 MiB in all).
+            - {name: ZK_SERVER_HEAP, value: "256"}
+            - {name: ZOO_LOG_DIR, value: /logs}
+          ports:
+            - {name: client-tls, containerPort: 2281}
+          readinessProbe:
+            tcpSocket: {port: client-tls}
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: {port: client-tls}
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 6
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 20m, memory: 192Mi, ephemeral-storage: 32Mi}
+            limits: {cpu: "1", memory: 512Mi, ephemeral-storage: 128Mi}
+          volumeMounts:
+            - {name: config, mountPath: /conf/zoo.cfg, subPath: zoo.cfg, readOnly: true}
+            - {name: tls, mountPath: /tls, readOnly: true}
+            - {name: data, mountPath: /data}
+            - {name: logs, mountPath: /logs}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: config
+          configMap: {name: zookeeper-config}
+        - name: tls
+          secret: {secretName: zookeeper-tls}
+        - name: data
+          persistentVolumeClaim: {claimName: zookeeper}
+        - name: logs
+          emptyDir: {sizeLimit: 64Mi}
+        - name: tmp
+          emptyDir: {sizeLimit: 64Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zookeeper
+  labels:
+    app.kubernetes.io/name: zookeeper
+spec:
+  selector:
+    app.kubernetes.io/name: zookeeper
+  ports:
+    - {name: client-tls, port: 2281, targetPort: client-tls}

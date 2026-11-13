@@ -1,0 +1,32 @@
+# Zuul's services in zuul (README.md): ZooKeeper, the database, the
+# scheduler, web and the launcher. Namespaced only, so the tenant applies it with their own
+# certificate, after the admin has applied ../namespace/ (the namespace, its quota, the state
+# volumes), the claims are bound and the Secrets exist (../secrets.sh):
+#   kubectl -n zuul apply -k deploy/zuul/server The executor is the admin's, in
+# zuul-executor (../executor/), from the same configuration and version.
+#
+# The configuration is generated into ConfigMaps whose names carry a hash of their contents: a
+# changed file makes a new ConfigMap, and every pod that mounts it is replaced.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: zuul
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: zuul
+    includeSelectors: false
+resources:
+  - config
+  - zookeeper.yaml
+  - database.yaml
+  - scheduler.yaml
+  - web.yaml
+  - launcher.yaml
+components:
+  - version
+configMapGenerator:
+  - name: zookeeper-config
+    files:
+      - zoo.cfg
+  - name: db-config
+    files:
+      - zuul.cnf

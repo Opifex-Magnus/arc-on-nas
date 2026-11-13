@@ -1,0 +1,8 @@
+# MariaDB's settings for Zuul's database (database.yaml), on top of the image's. The buffer pool is
+# small: Zuul writes a row per build and buildset, and reads them for its web pages.
+[mariadbd]
+innodb_buffer_pool_size=64M
+max_connections=100
+skip-name-resolve
+character-set-server=utf8mb4
+collation-server=utf8mb4_unicode_ci

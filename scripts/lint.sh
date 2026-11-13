@@ -70,7 +70,9 @@ done
 echo "rendered into $out/"
 
 step kubeconform
-kubeconform -strict -summary -ignore-filename-pattern kustomization.yaml manifests/
+# The Zuul test bed's tenant configuration (main.yaml) is Zuul's, not a Kubernetes object.
+kubeconform -strict -summary -ignore-filename-pattern kustomization.yaml \
+  -ignore-filename-pattern 'testbed-zuul/server/config/main\.yaml$' manifests/
 # ARC's own resources (AutoscalingRunnerSet) have no published schema; everything else is checked.
 kubeconform -strict -summary -skip AutoscalingRunnerSet \
   "$out/controller.yaml" "$out/swift.yaml" "$out/ubuntu.yaml" "$out/browser.yaml" \
