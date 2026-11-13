@@ -1012,11 +1012,11 @@ jobs:
           echo "Zuul's tables: $(sql 'SHOW TABLES FROM zuul' | paste -sd ' ' -)"
           docker compose exec -T k3s sh -c 'd=/var/lib/zuul-state
             ls -ln "$d/zookeeper/data/version-2"; du -sh "$d"/*/data'
-          k -n zuul delete pod zookeeper-0 db-0
-          k -n zuul rollout restart deployment/scheduler deployment/web deployment/launcher
-          # The executor stops on SIGTERM (zuul.conf, sigterm_method) and, with no build running, must
-          # be gone well within its grace period. If not, Zuul's SIGUSR2 handler logs every thread's
-          # stack, for the diagnosis.
+          # The executor first, while ZooKeeper is up, as for an upgrade (deploy/zuul/README.md): on
+          # SIGTERM it stops (zuul.conf, sigterm_method) and, with no build running, must be gone
+          # within seconds. (With ZooKeeper down at that moment, Zuul 14's graceful stop fails and the
+          # executor runs on until its grace period ends.) If not, Zuul's SIGUSR2 handler logs every
+          # thread's stack, for the diagnosis.
           uid=$(k -n zuul-executor get pod executor-0 -o jsonpath='{.metadata.uid}')
           k -n zuul-executor delete pod executor-0 --wait=false
           gone=""
@@ -1038,6 +1038,8 @@ jobs:
             exit 1
           fi
           echo "executor-0 stopped by SIGTERM"
+          k -n zuul delete pod zookeeper-0 db-0
+          k -n zuul rollout restart deployment/scheduler deployment/web deployment/launcher
           for p in zuul/zookeeper-0 zuul/db-0 zuul-executor/executor-0; do
             for _ in $(seq 1 30); do k -n "${p%/*}" get pod "${p#*/}" > /dev/null 2>&1 && break; sleep 2; done
             k -n "${p%/*}" wait --for=condition=Ready "pod/${p#*/}" --timeout=300s
