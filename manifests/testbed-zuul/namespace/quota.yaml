@@ -16,9 +16,9 @@ spec:
     requests.cpu: "1"
     # CPU limits only throttle; the k3s container's CPU cap and weight are what protect the host.
     limits.cpu: "8"
-    # server/ requests 1056Mi and is limited to 3 GiB; the rest is for a rolling update, which
-    # starts a pod's replacement (the scheduler's, 256Mi and 1 GiB, is the largest) before the old
-    # one goes.
+    # server/ requests 1056Mi and is limited to 3 GiB. Its Deployments replace a pod only after the
+    # old one is gone (strategy Recreate), so an update needs no more; the rest is room for a pod to
+    # look at Zuul from (a curl client, kubectl run), with the LimitRange's defaults.
     requests.memory: 1536Mi
     limits.memory: 4Gi
     # Disk on the node: emptyDir volumes, the containers' writable layers and their logs, which the

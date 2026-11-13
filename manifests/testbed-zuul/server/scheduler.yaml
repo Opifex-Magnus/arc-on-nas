@@ -13,6 +13,10 @@ metadata:
     app.kubernetes.io/name: scheduler
 spec:
   replicas: 1
+  # The old pod goes before the new one starts: the namespace's quota has no room for both of every
+  # service at once (../namespace/quota.yaml), and one copy each is what runs anyway.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: scheduler
