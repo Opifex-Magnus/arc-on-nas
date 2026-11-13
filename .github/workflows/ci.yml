@@ -1014,7 +1014,30 @@ jobs:
             ls -ln "$d/zookeeper/data/version-2"; du -sh "$d"/*/data'
           k -n zuul delete pod zookeeper-0 db-0
           k -n zuul rollout restart deployment/scheduler deployment/web deployment/launcher
-          k -n zuul-executor delete pod executor-0
+          # The executor stops on SIGTERM (zuul.conf, sigterm_method) and, with no build running, must
+          # be gone well within its grace period. If not, Zuul's SIGUSR2 handler logs every thread's
+          # stack, for the diagnosis.
+          uid=$(k -n zuul-executor get pod executor-0 -o jsonpath='{.metadata.uid}')
+          k -n zuul-executor delete pod executor-0 --wait=false
+          gone=""
+          for _ in $(seq 1 36); do
+            now=$(k -n zuul-executor get pod executor-0 -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
+            [ "$now" != "$uid" ] && { gone=yes; break; }
+            sleep 5
+          done
+          if [ -z "$gone" ]; then
+            echo "executor-0 still running 180 s after SIGTERM" >&2
+            # shellcheck disable=SC2016 # expanded in the pod's shell
+            k -n zuul-executor exec executor-0 -- sh -c 'for d in /proc/[0-9]*; do
+              printf "%s %s\n" "${d#/proc/}" "$(tr "\0" " " < "$d/cmdline" 2>/dev/null)"; done
+              for d in /proc/[0-9]*; do
+                grep -q zuul-executor "$d/cmdline" 2>/dev/null && kill -USR2 "${d#/proc/}"
+              done' || true
+            sleep 5
+            k -n zuul-executor logs executor-0 --tail 400 || true
+            exit 1
+          fi
+          echo "executor-0 stopped by SIGTERM"
           for p in zuul/zookeeper-0 zuul/db-0 zuul-executor/executor-0; do
             for _ in $(seq 1 30); do k -n "${p%/*}" get pod "${p#*/}" > /dev/null 2>&1 && break; sleep 2; done
             k -n "${p%/*}" wait --for=condition=Ready "pod/${p#*/}" --timeout=300s
