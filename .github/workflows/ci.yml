@@ -1012,33 +1012,36 @@ jobs:
           echo "Zuul's tables: $(sql 'SHOW TABLES FROM zuul' | paste -sd ' ' -)"
           docker compose exec -T k3s sh -c 'd=/var/lib/zuul-state
             ls -ln "$d/zookeeper/data/version-2"; du -sh "$d"/*/data'
-          # The executor first, while ZooKeeper is up, as for an upgrade (deploy/zuul/README.md): on
-          # SIGTERM it stops (zuul.conf, sigterm_method) and, with no build running, must be gone
-          # within seconds. (With ZooKeeper down at that moment, Zuul 14's graceful stop fails and the
-          # executor runs on until its grace period ends.) If not, Zuul's SIGUSR2 handler logs every
-          # thread's stack, for the diagnosis.
-          uid=$(k -n zuul-executor get pod executor-0 -o jsonpath='{.metadata.uid}')
-          k -n zuul-executor delete pod executor-0 --wait=false
-          gone=""
-          for _ in $(seq 1 36); do
-            now=$(k -n zuul-executor get pod executor-0 -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
-            [ "$now" != "$uid" ] && { gone=yes; break; }
-            sleep 5
-          done
-          if [ -z "$gone" ]; then
-            echo "executor-0 still running 180 s after SIGTERM" >&2
-            # shellcheck disable=SC2016 # expanded in the pod's shell
-            k -n zuul-executor exec executor-0 -- sh -c 'for d in /proc/[0-9]*; do
-              printf "%s %s\n" "${d#/proc/}" "$(tr "\0" " " < "$d/cmdline" 2>/dev/null)"; done
-              for d in /proc/[0-9]*; do
-                grep -q zuul-executor "$d/cmdline" 2>/dev/null && kill -USR2 "${d#/proc/}"
-              done' || true
-            sleep 5
-            k -n zuul-executor logs executor-0 --tail 400 || true
-            exit 1
-          fi
-          echo "executor-0 stopped by SIGTERM"
-          k -n zuul delete pod zookeeper-0 db-0
+          # The executor's stop is bounded whatever the order (deploy/zuul/README.md, "Stopping the
+          # executor"). stops <seconds> <label>: executor-0 is deleted and a new pod replaces it within
+          # <seconds>, with run.sh's lines from the old one's log.
+          stops() {
+            local uid now gone="" start
+            uid=$(k -n zuul-executor get pod executor-0 -o jsonpath='{.metadata.uid}')
+            k -n zuul-executor logs -f executor-0 > "$RUNNER_TEMP/executor-$2.log" 2>&1 &
+            start=$(date +%s)
+            k -n zuul-executor delete pod executor-0 --wait=false
+            for _ in $(seq 1 "$1"); do
+              now=$(k -n zuul-executor get pod executor-0 -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
+              [ "$now" != "$uid" ] && { gone=yes; break; }
+              sleep 1
+            done
+            sleep 2
+            grep 'run.sh:' "$RUNNER_TEMP/executor-$2.log" || true
+            [ -n "$gone" ] || { echo "executor-0 still running $1 s after SIGTERM ($2)" >&2; return 1; }
+            echo "executor-0 stopped $2 in $(( $(date +%s) - start ))s (bound $1s)"
+            k -n zuul-executor wait --for=condition=Ready pod/executor-0 --timeout=300s
+          }
+          # With ZooKeeper up, as for an upgrade: a graceful stop, in seconds.
+          stops 60 "with ZooKeeper up"
+          grep -q 'run.sh: zuul-executor exited (0)' "$RUNNER_TEMP/executor-with ZooKeeper up.log"
+          retry 300 loaded
+          # ZooKeeper first, as a reboot may stop them: a hard stop, within the bound.
+          k -n zuul delete pod zookeeper-0 --wait=false
+          sleep 2
+          stops 90 "after ZooKeeper"
+          grep -q 'run.sh: ZooKeeper does not answer' "$RUNNER_TEMP/executor-after ZooKeeper.log"
+          k -n zuul delete pod db-0
           k -n zuul rollout restart deployment/scheduler deployment/web deployment/launcher
           for p in zuul/zookeeper-0 zuul/db-0 zuul-executor/executor-0; do
             for _ in $(seq 1 30); do k -n "${p%/*}" get pod "${p#*/}" > /dev/null 2>&1 && break; sleep 2; done

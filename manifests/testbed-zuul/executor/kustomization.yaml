@@ -23,3 +23,7 @@ resources:
   - executor.yaml
 components:
   - ../server/version
+configMapGenerator:
+  - name: executor-run
+    files:
+      - run.sh

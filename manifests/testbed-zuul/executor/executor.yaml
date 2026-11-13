@@ -6,8 +6,10 @@
 #
 # A StatefulSet, for a name that resolves: the executor registers its host name in ZooKeeper
 # (ZUUL_EXECUTOR_HOSTNAME, below), and zuul-web connects to it there for a build's live log.
-# On SIGTERM it takes no new builds and lets the running ones finish (zuul.conf, sigterm_method),
-# for up to the grace period below; a build still running then fails, and Zuul runs it again.
+# On SIGTERM it takes no new builds and lets the running ones finish (zuul.conf, sigterm_method).
+# That needs ZooKeeper, so run.sh bounds it: a hard stop when ZooKeeper does not answer, and at
+# its deadline, a minute before the grace period below ends. A build still running then fails, and
+# Zuul runs it again (README.md, "Stopping the executor").
 #
 # Memory: the trial measured 350 MiB idle and 510 MiB with two light builds; each running build adds
 # its Ansible processes. Zuul's own memory guard cannot see this limit (it reads cgroup v1 only), so
@@ -37,6 +39,9 @@ spec:
           # The tag and digest are set for every Zuul service at once, in
           # ../server/version/.
           image: quay.io/zuul-ci/zuul-executor
+          # run.sh, under the image's dumb-init, but sending SIGTERM to run.sh alone: it bounds the stop
+          # (run.sh, README.md, "Stopping the executor").
+          command: [/usr/bin/dumb-init, --single-child, --, /bin/sh, /etc/zuul-executor/run.sh]
           env:
             # The internet only through the proxy; nothing in the cluster through it.
             - {name: HTTPS_PROXY, value: "http://172.31.250.2:3128"}
@@ -50,6 +55,8 @@ spec:
             - name: POD_NAME
               valueFrom: {fieldRef: {fieldPath: metadata.name}}
             - {name: ZUUL_EXECUTOR_HOSTNAME, value: "$(POD_NAME).executor.zuul-executor.svc.cluster.local"}
+            # run.sh's deadline: a minute before the grace period below ends.
+            - {name: ZUUL_STOP_DEADLINE, value: "1740"}
           ports:
             - {name: finger, containerPort: 7900}
             - {name: metrics, containerPort: 9091}
@@ -70,6 +77,7 @@ spec:
             - {name: config, mountPath: /etc/zuul, readOnly: true}
             - {name: tls, mountPath: /etc/zuul-tls, readOnly: true}
             - {name: state, mountPath: /var/lib/zuul}
+            - {name: run, mountPath: /etc/zuul-executor, readOnly: true}
       volumes:
         - name: config
           configMap: {name: zuul-config}
@@ -78,6 +86,8 @@ spec:
           secret: {secretName: zuul-zookeeper-client}
         - name: state
           emptyDir: {}
+        - name: run
+          configMap: {name: executor-run}
 ---
 # Headless: gives the pod the name it registers (above).
 apiVersion: v1
