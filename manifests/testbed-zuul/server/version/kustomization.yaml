@@ -7,14 +7,14 @@ apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
 images:
   - name: quay.io/zuul-ci/zuul-scheduler
-    newTag: 14.2.0
-    digest: sha256:fa08909713302c1187195dfddafbe92bb0b92c5e0adcd07fc44b3c333bc22797
+    newTag: 14.3.0
+    digest: sha256:d6b58c2c20b3466b491d079450cfc5fb9ded92613f4f6f8c0dbc30f0dfa59dca
   - name: quay.io/zuul-ci/zuul-web
-    newTag: 14.2.0
-    digest: sha256:4a84aead0c7a2cc2ade481586ed6196a4282e676fb84dddd596eadf007fba431
+    newTag: 14.3.0
+    digest: sha256:ea3e36094a5a83dc656d9ac0feba18d66a0020886663f1680ecc019d52b9d8fc
   - name: quay.io/zuul-ci/zuul-launcher
-    newTag: 14.2.0
-    digest: sha256:d64df2f7fad9798954c917206890e08d5f418f0fd8de5a4c5463521387e2021a
+    newTag: 14.3.0
+    digest: sha256:0abdb2596b0c2a1e82325753482a7167fbe763f623d5e9ef14254711a2ffc2a4
   - name: quay.io/zuul-ci/zuul-executor
-    newTag: 14.2.0
-    digest: sha256:a64706b8b98a39e2b04d8f2ac360f12f8562b76fe708f8ab12b79f6da92def7f
+    newTag: 14.3.0
+    digest: sha256:92cb81d6a076af56617c8024ac14fb4e2222bb835769b35019583679eddbcdd9
